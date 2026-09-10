@@ -726,58 +726,84 @@ with tabs[2]:
     else:
         st.warning("실행할 Workflow가 없습니다.")
 
-    user_prompt = st.text_area(
-        "User Prompt",
-        height=200,
-        placeholder="완성된 Linear Workflow의 첫 번째 에이전트에게 전달할 실제 업무 요청을 입력하세요.",
-    )
-
-    # 실행 버튼이 비활성화되는 이유를 사용자에게 명확히 보여준다.
-    readiness = {
-        "API Key": bool(api_key),
-        "Linear Workflow": bool(st.session_state.workflow),
-        "User Prompt": bool(user_prompt.strip()),
-    }
-    missing_requirements = [name for name, ready in readiness.items() if not ready]
-    run_disabled = bool(missing_requirements)
-
-    st.markdown("#### 실행 준비 상태")
-    status_cols = st.columns(3)
-    for col, (name, ready) in zip(status_cols, readiness.items()):
-        with col:
-            if ready:
-                st.success(f"✓ {name}")
-            else:
-                st.error(f"✕ {name}")
-
-    if missing_requirements:
-        guidance = {
-            "API Key": "왼쪽 사이드바의 **OpenAI API Key**를 입력하세요.",
-            "Linear Workflow": "2번 탭에서 에이전트를 하나 이상 Workflow Step으로 추가하세요.",
-            "User Prompt": "위의 **User Prompt** 입력창에 실행할 요청을 입력하세요.",
-        }
-        st.warning(
-            "**아직 실행할 수 없습니다.** 다음 항목을 확인해 주세요:\n\n"
-            + "\n".join(f"- {guidance[item]}" for item in missing_requirements)
+    # User Prompt와 실행 버튼을 같은 form에 넣는다.
+    # 이렇게 하면 텍스트 입력 후 Ctrl+Enter를 누를 필요 없이,
+    # 실행 버튼 클릭 시 현재 입력 내용이 함께 서버로 제출된다.
+    with st.form(
+        "workflow_run_form",
+        clear_on_submit=False,
+        enter_to_submit=False,
+    ):
+        user_prompt = st.text_area(
+            "User Prompt",
+            height=200,
+            placeholder="완성된 Linear Workflow의 첫 번째 에이전트에게 전달할 실제 업무 요청을 입력하세요.",
+            key="workflow_user_prompt",
         )
-        button_label = "▶ Linear Workflow 실행 · 준비 필요"
-    else:
-        st.success("모든 실행 조건이 충족되었습니다. 아래 버튼을 눌러 Workflow를 실행하세요.")
-        button_label = "▶ Linear Workflow 실행"
 
-    run_clicked = st.button(
-        button_label,
-        type="primary",
-        use_container_width=True,
-        disabled=run_disabled,
-        help=(
-            "비활성화 이유: " + ", ".join(missing_requirements)
-            if missing_requirements
-            else "Workflow를 실행합니다."
-        ),
-    )
+        # API Key / Workflow가 없을 때만 실행 버튼을 비활성화한다.
+        # User Prompt는 버튼 클릭 시 form과 함께 제출되므로 클릭 후 검증한다.
+        base_readiness = {
+            "API Key": bool(api_key),
+            "Linear Workflow": bool(st.session_state.workflow),
+        }
+        base_missing = [name for name, ready in base_readiness.items() if not ready]
+        run_disabled = bool(base_missing)
 
-    if run_clicked:
+        st.markdown("#### 실행 준비 상태")
+        status_cols = st.columns(3)
+
+        with status_cols[0]:
+            if api_key:
+                st.success("✓ API Key")
+            else:
+                st.error("✕ API Key")
+
+        with status_cols[1]:
+            if st.session_state.workflow:
+                st.success("✓ Linear Workflow")
+            else:
+                st.error("✕ Linear Workflow")
+
+        with status_cols[2]:
+            st.info("User Prompt는 실행 버튼 클릭 시 확인")
+
+        if base_missing:
+            guidance = {
+                "API Key": "왼쪽 사이드바의 **OpenAI API Key**를 입력하세요.",
+                "Linear Workflow": "2번 탭에서 에이전트를 하나 이상 Workflow Step으로 추가하세요.",
+            }
+            st.warning(
+                "**아직 실행할 수 없습니다.** 다음 항목을 확인해 주세요:\n\n"
+                + "\n".join(f"- {guidance[item]}" for item in base_missing)
+            )
+            button_label = "▶ Linear Workflow 실행 · 준비 필요"
+        else:
+            st.caption(
+                "User Prompt를 입력한 뒤 **Ctrl+Enter 없이 바로 실행 버튼을 누르면 됩니다.** "
+                "버튼 클릭 시 현재 입력 내용이 자동으로 제출됩니다."
+            )
+            button_label = "▶ Linear Workflow 실행"
+
+        run_clicked = st.form_submit_button(
+            button_label,
+            type="primary",
+            use_container_width=True,
+            disabled=run_disabled,
+            help=(
+                "비활성화 이유: " + ", ".join(base_missing)
+                if base_missing
+                else "현재 입력한 User Prompt와 함께 Workflow를 실행합니다."
+            ),
+        )
+
+    if run_clicked and not user_prompt.strip():
+        st.error(
+            "User Prompt가 비어 있습니다. 위 입력창에 요청을 작성한 뒤 "
+            "**Linear Workflow 실행** 버튼을 다시 눌러주세요."
+        )
+
+    if run_clicked and user_prompt.strip():
         client = OpenAI(api_key=api_key)
         results = []
         previous_output = None
