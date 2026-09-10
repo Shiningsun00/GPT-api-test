@@ -1,3 +1,5 @@
+# app.py — Agent Workflow Studio
+# Dependency-aware Manager orchestration; compatible with workspace schema 1–4.
 import csv
 import hashlib
 import html
@@ -609,6 +611,14 @@ def restore_workspace_bundle(bundle_bytes: bytes) -> dict:
         ),
         "workers": restored_workers,
     }
+    st.session_state["workflow_mode_selector"] = st.session_state.workflow_mode
+    st.session_state["hier_manager_select"] = manager_agent_id
+    for worker in restored_workers:
+        st.session_state["hier_extra_" + worker["worker_id"]] = worker.get("additional_prompt", "")
+    for step in restored_workflow:
+        st.session_state["linear_extra_" + step["step_id"]] = step.get("additional_prompt", "")
+    for field in ("manager_planning_prompt", "manager_synthesis_prompt", "manager_routing_prompt"):
+        st.session_state["hier_" + field] = st.session_state.hierarchy[field]
     st.session_state.rag_cache = {}
     st.session_state.notion_cache = {}
     st.session_state.notion_cache_epoch = int(st.session_state.get("notion_cache_epoch", 0)) + 1
@@ -1022,6 +1032,8 @@ def _query_notion_data_source(token: str, data_source_id: str, max_pages: int) -
         if not response.get("has_more") or not response.get("next_cursor"):
             break
         cursor = response.get("next_cursor")
+        if len(pages) >= max_pages:
+            raise NotionAPIError(None, "Notion 페이지 수 한도에 도달했습니다. 소스 범위를 나눠 등록하세요. 전체 수집으로 처리하지 않았습니다.")
     return pages
 
 
@@ -1030,7 +1042,7 @@ def _notion_pages_to_markdown(token: str, pages: list[dict], max_chars: int) -> 
     used = 0
     for page in pages:
         if used >= max_chars:
-            break
+            raise NotionAPIError(None, "Notion 본문 한도 초과: 소스 범위를 나눠 등록하세요.")
         page_id = str(page.get("id", ""))
         if not page_id:
             continue
@@ -1043,7 +1055,9 @@ def _notion_pages_to_markdown(token: str, pages: list[dict], max_chars: int) -> 
         property_section = f"**Properties**\n{properties_text}\n\n" if properties_text else ""
         section = f"## {title}\n\n{property_section}{markdown}"
         remaining = max_chars - used
-        blocks.append(section[:remaining])
+        if len(section) > remaining:
+            raise NotionAPIError(None, "Notion 본문 한도 초과: 소스 범위를 나눠 등록하세요.")
+        blocks.append(section)
         used += min(len(section), remaining)
     return "\n\n---\n\n".join(blocks)
 
@@ -1055,7 +1069,7 @@ def fetch_notion_database(token: str, database_id: str, database_obj: dict | Non
     pages = []
     for source in data_sources:
         if len(pages) >= MAX_NOTION_DATABASE_PAGES:
-            break
+            raise NotionAPIError(None, "Notion 데이터베이스 페이지 한도 초과: 데이터 소스를 나눠 등록하세요.")
         source_id = str((source or {}).get("id", ""))
         if not source_id:
             continue
@@ -1473,7 +1487,7 @@ def session_worker_registry(session: dict) -> list[dict]:
 def worker_roster_for_manager(registry: list[dict]) -> str:
     blocks = []
     for item in registry:
-        role = clip_memory(item.get("system_prompt", ""), 2400)
+        role = role_description(item)
         extra = clip_memory(item.get("additional_prompt", ""), 1200) or "No extra worker instruction."
         blocks.append(
             f"{item['worker_key']} | Worker {item['position']} | {item['name']} | {item['model']}\n"
@@ -1517,14 +1531,7 @@ def normalize_routing_decision(raw_decision: dict, registry: list[dict], fallbac
     elif assignments:
         action = "delegate"
     else:
-        # If the manager failed to provide usable routing, re-run all available workers rather than dropping the request.
-        action = "delegate" if registry else "manager_only"
-        assignments = [
-            {"worker_key": item["worker_key"], "task": fallback_feedback.strip()}
-            for item in registry
-        ]
-        if not reason:
-            reason = "라우팅 결과가 불완전하여 안전하게 사용 가능한 Worker 전체에 재검토를 요청했습니다."
+        raise ValueError("라우팅 결과가 유효하지 않습니다. Worker 전체를 임의 실행하지 않았습니다.")
 
     if not manager_message:
         if action == "delegate":
@@ -1911,7 +1918,7 @@ def render_hierarchical_feedback_panel(api_key: str):
         with st.chat_message("assistant", avatar="👑"):
             st.caption(f"{session.get('manager_name', 'Manager')} · Revision v1")
             st.write(first_revision.get("final_output", session.get("current_final_output", "")))
-            worker_count = len(registry)
+            worker_count = len(first_revision.get("worker_outputs", {}))
             st.caption(f"✓ v1 · 전문 Agent {worker_count}명 참여")
 
         # Every later revision is another user -> Manager turn.
@@ -1973,6 +1980,7 @@ def render_hierarchical_feedback_panel(api_key: str):
             for rev in revisions
         ],
         "current_final_output": session.get("current_final_output"),
+        "engine": session.get("engine", {}),
     }
     st.download_button(
         "Manager 대화 · Revision 기록 JSON 다운로드",
@@ -2006,150 +2014,21 @@ def render_hierarchical_feedback_panel(api_key: str):
             st.write(feedback)
 
         try:
-            roster = worker_roster_for_manager(registry) or "No available workers."
-            routing_input = (
-                f"## Original user request\n{clip_memory(session.get('original_user_prompt', ''), 18000)}\n\n"
-                f"## Current final report (Revision v{current_revision})\n{clip_memory(previous_final, 26000)}\n\n"
-                f"## Follow-up conversation memory\n{compact_chat_history(chat_history[:-1])}\n\n"
-                f"## Latest user feedback\n{feedback}\n\n"
-                f"## Available workers\n{roster}"
-            )
-            routing_input = clip_memory(routing_input, MAX_MANAGER_MEMORY_CHARS)
-
-            with st.status(f"Manager · {manager['name']} 요청을 분석하고 있습니다", expanded=True) as status:
-                routing_prompt = session.get("manager_routing_prompt", DEFAULT_MANAGER_ROUTING_PROMPT)
-                routing_agent = dict(manager)
-                routing_agent["system_prompt"] = (
-                    manager.get("system_prompt", "").strip()
-                    + "\n\n[Hierarchical feedback routing mode]\n"
-                    + routing_prompt.strip()
-                ).strip()
-                routing_text, routing_usage = call_agent(
-                    client=client,
-                    agent=routing_agent,
-                    primary_input=routing_input,
-                    additional_prompt="Analyze the latest feedback and return the routing decision now.",
-                    rag_context="",
-                    execution_file_context="",
-                )
-                try:
-                    raw_decision = extract_json_object(routing_text)
-                except Exception:
-                    raw_decision = {}
-                decision = normalize_routing_decision(raw_decision, registry, feedback)
-                routing_steps.append(
-                    {
-                        "target_id": "hier_manager",
-                        "agent_id": manager.get("id"),
-                        "stage_label": f"Revision {current_revision + 1} · Manager Routing",
-                        "agent_name": manager["name"],
-                        "model": manager["model"],
-                        "primary_input": routing_input,
-                        "additional_prompt": session.get("manager_routing_prompt", DEFAULT_MANAGER_ROUTING_PROMPT),
-                        "execution_files": [],
-                        "rag_sources": [],
-                        "rag_truncated": False,
-                        "output": routing_text,
-                        "usage": routing_usage,
-                    }
-                )
-                status.update(label=f"Manager · {manager['name']} 작업 분류 완료", state="complete")
-                if decision.get("manager_message"):
-                    st.caption(decision["manager_message"])
-
+            # Apply current UI policy to the continuing session explicitly.
+            current_hierarchy = st.session_state.hierarchy
+            for key in ("manager_planning_prompt", "manager_synthesis_prompt", "manager_routing_prompt"):
+                session[key] = current_hierarchy.get(key, session.get(key, ""))
+            extras = {w["worker_id"]: w.get("additional_prompt", "") for w in current_hierarchy.get("workers", [])}
+            for worker in session.get("workers", []):
+                worker["additional_prompt"] = extras.get(worker["worker_id"], worker.get("additional_prompt", ""))
+            with st.status("Manager · 단계별 작업 및 재검토 진행 중", expanded=True) as status:
+                final_output, routing_steps, round_decisions, new_worker_outputs = run_managed_workflow(client, manager, session, feedback)
+                status.update(label="Manager · " + session.get("engine", {}).get("status", "완료"), state="complete")
             registry_by_key = {item["worker_key"]: item for item in registry}
-            new_worker_outputs = {}
-            assignments = decision.get("assignments", [])
-
-            if assignments:
-                progress = st.progress(0.0)
-                for index, assignment in enumerate(assignments, start=1):
-                    item = registry_by_key.get(assignment["worker_key"])
-                    if not item:
-                        continue
-                    worker_agent = st.session_state.agents[item["agent_id"]]
-                    prior_worker_output = session.get("latest_worker_outputs", {}).get(item["worker_id"], "")
-                    manager_task = assignment.get("task", feedback)
-
-                    worker_input = (
-                        f"## Original user request\n{clip_memory(session.get('original_user_prompt', ''), 16000)}\n\n"
-                        f"## Previous Manager final report\n{clip_memory(previous_final, 22000)}\n\n"
-                        f"## User's latest feedback\n{feedback}\n\n"
-                        f"## Manager routing reason\n{decision.get('reason', '')}\n\n"
-                        f"## Your assigned revision task\n{manager_task}\n\n"
-                        f"## Your previous output from this workflow\n{clip_memory(prior_worker_output, 22000) or 'No previous output.'}\n\n"
-                        "Rework only what is necessary for this revision. Preserve valid prior findings, explicitly correct anything that changes, "
-                        "and return a concrete result to the Manager."
-                    )
-                    worker_extra_parts = []
-                    if item.get("additional_prompt", "").strip():
-                        worker_extra_parts.append(item["additional_prompt"].strip())
-                    worker_extra_parts.append(f"Manager revision assignment:\n{manager_task}")
-                    worker_extra = "\n\n".join(worker_extra_parts)
-
-                    with st.status(
-                        f"{worker_agent['name']} · 선택 재검토 중",
-                        expanded=True,
-                    ) as status:
-                        worker_output, worker_result = execute_agent_stage(
-                            client=client,
-                            agent=worker_agent,
-                            primary_input=worker_input,
-                            additional_prompt=worker_extra,
-                            target_id=item["worker_id"],
-                            stage_label=f"Revision {current_revision + 1} · {worker_agent['name']}",
-                            execution_context_by_target=execution_context_by_target,
-                            execution_filenames_by_target=execution_filenames_by_target,
-                        )
-                        new_worker_outputs[item["worker_id"]] = worker_output
-                        routing_steps.append(worker_result)
-                        status.update(label=f"{worker_agent['name']} 재검토 완료", state="complete")
-                    progress.progress(index / max(len(assignments), 1))
-
+            assignments = [a for d in round_decisions for a in d.get("assignments", [])]
+            decision = {"action": "delegate" if assignments else "manager_only", "reason": "의존성에 따른 단계별 실행", "manager_message": "현재 요청 처리", "assignments": assignments}
             latest_worker_outputs = dict(session.get("latest_worker_outputs", {}))
             latest_worker_outputs.update(new_worker_outputs)
-
-            latest_worker_blocks = []
-            for item in registry:
-                output = latest_worker_outputs.get(item["worker_id"], "")
-                if not output:
-                    continue
-                changed = item["worker_id"] in new_worker_outputs
-                latest_worker_blocks.append(
-                    f"## {item['worker_key']} · {item['name']} · {'UPDATED THIS REVISION' if changed else 'PRESERVED FROM PRIOR REVISION'}\n"
-                    f"{clip_memory(output, MAX_MEMORY_OUTPUT_CHARS)}"
-                )
-
-            assignment_summary = json.dumps(decision, ensure_ascii=False, indent=2)
-            synthesis_input = (
-                f"## Original user request\n{clip_memory(session.get('original_user_prompt', ''), 16000)}\n\n"
-                f"## Previous final report (v{current_revision})\n{clip_memory(previous_final, 26000)}\n\n"
-                f"## User feedback for revision v{current_revision + 1}\n{feedback}\n\n"
-                f"## Manager routing decision\n{assignment_summary}\n\n"
-                f"## Conversation memory\n{compact_chat_history(chat_history)}\n\n"
-                f"## Latest worker evidence\n" + ("\n\n---\n\n".join(latest_worker_blocks) or "No worker output was required for this revision.")
-            )
-            synthesis_input = clip_memory(synthesis_input, MAX_MANAGER_MEMORY_CHARS)
-            revision_prompt = (
-                session.get("manager_synthesis_prompt", DEFAULT_MANAGER_SYNTHESIS_PROMPT).strip()
-                + "\n\n"
-                + DEFAULT_MANAGER_REVISION_PROMPT
-            )
-
-            with st.status(f"Manager · {manager['name']} Revision v{current_revision + 1} 최종 검증 중", expanded=True) as status:
-                final_output, final_result = execute_agent_stage(
-                    client=client,
-                    agent=manager,
-                    primary_input=synthesis_input,
-                    additional_prompt=revision_prompt,
-                    target_id="hier_manager",
-                    stage_label=f"Revision {current_revision + 1} · Manager Synthesis",
-                    execution_context_by_target=execution_context_by_target,
-                    execution_filenames_by_target=execution_filenames_by_target,
-                )
-                routing_steps.append(final_result)
-                status.update(label=f"Manager · {manager['name']} Revision v{current_revision + 1} 완료", state="complete")
-
             selected_names = [
                 registry_by_key[a["worker_key"]]["name"]
                 for a in assignments
@@ -2199,6 +2078,271 @@ def render_hierarchical_feedback_panel(api_key: str):
             if chat_history and chat_history[-1].get("role") == "user" and chat_history[-1].get("content") == feedback:
                 chat_history.pop()
             st.error(f"Manager 피드백 반영 중 오류가 발생했습니다: {exc}")
+
+
+# Dependency-aware Manager runtime. No Worker output is treated as a system instruction.
+MAX_AUTO_ROUNDS = 18
+MAX_AUTO_REVISIONS = 2
+MAX_RUNTIME_INPUT_CHARS = 350_000
+
+
+def role_description(agent: dict) -> str:
+    text = re.sub(r'<REFERENCE_DATA\b[^>]*>.*?</REFERENCE_DATA>', '', agent.get('system_prompt', ''), flags=re.S)
+    return text.strip()
+
+
+def runtime_json(client, agent, text, contract, rag_context="", file_context=""):
+    """Retry invalid JSON once; never fall back to running every Worker."""
+    agent = dict(agent)
+    agent['system_prompt'] = agent.get('system_prompt', '') + '\n[현재 실행 모드 출력 계약 — 일반 출력 형식보다 우선]\n' + contract
+    error = ''
+    for attempt in range(2):
+        raw, _ = call_agent(client, agent, text, contract + error, rag_context, file_context)
+        try:
+            return extract_json_object(raw)
+        except (ValueError, TypeError) as exc:
+            error = '\nPrevious response was invalid JSON. Return exactly the requested object. ' + str(exc)
+    raise ValueError('Manager/Worker JSON 형식 오류가 반복되어 중단했습니다. 전체 Worker를 임의 실행하지 않았습니다.')
+
+
+def validate_plan(plan, registry, artifacts):
+    action = plan.get('action')
+    if action not in ('delegate', 'final', 'needs_input'):
+        raise ValueError('작업 계획 action은 delegate/final/needs_input이어야 합니다.')
+    if action != 'delegate':
+        return plan
+    assignments = plan.get('assignments')
+    if not isinstance(assignments, list) or not assignments:
+        raise ValueError('delegate에는 assignments가 필요합니다.')
+    valid = {r['worker_key'] for r in registry}
+    seen = set()
+    for task in assignments:
+        if not isinstance(task, dict) or task.get('worker_key') not in valid:
+            raise ValueError('등록되지 않은 Worker입니다.')
+        if task['worker_key'] in seen:
+            raise ValueError('같은 라운드에 동일 Worker를 두 번 실행할 수 없습니다.')
+        seen.add(task['worker_key'])
+        if not isinstance(task.get('task'), str) or not task['task'].strip():
+            raise ValueError('구체적인 작업 지시가 필요합니다.')
+        if task.get('kind') not in ('intake', 'analysis', 'candidates', 'selection_review', 'strategy', 'draft', 'review'):
+            raise ValueError('지원하지 않는 작업 종류입니다.')
+        deps = task.get('depends_on', [])
+        if not isinstance(deps, list) or any(d not in artifacts for d in deps):
+            raise ValueError('완료되지 않은 산출물에 대한 의존성이 있습니다.')
+        if task['kind'] in ('candidates', 'selection_review', 'strategy', 'draft', 'review') and not deps:
+            raise ValueError('이 단계는 선행 산출물을 지정해야 합니다.')
+        if task['kind'] == 'selection_review' and any(artifacts[d]['kind'] != 'candidates' for d in deps):
+            raise ValueError('독립 소재평가는 점수 없는 candidates 산출물만 받습니다.')
+        if task['kind'] == 'review' and not any(artifacts[d]['kind'] == 'draft' for d in deps):
+            raise ValueError('검토할 초안 버전이 지정되지 않았습니다.')
+    roles = {}
+    for r in registry:
+        match = re.match(r"(W[1-6])(?:\s|$)", r.get('name', ''))
+        if match:
+            roles[r['worker_key']] = match.group(1)
+    if set(roles.values()) == {'W1','W2','W3','W4','W5','W6'}:
+        allowed = {'W1': {'intake'}, 'W2': {'analysis'}, 'W3': {'candidates','strategy'},
+                   'W4': {'draft'}, 'W5': {'review'}, 'W6': {'selection_review','review'}}
+        required = {'candidates': {'intake','analysis'}, 'selection_review': {'candidates'},
+                    'strategy': {'candidates','selection_review'}, 'draft': {'strategy'}, 'review': {'draft'}}
+        for task in assignments:
+            if task['kind'] not in allowed[roles[task['worker_key']]]:
+                raise ValueError('이 Worker의 전문 역할과 작업 종류가 맞지 않습니다.')
+            kinds = {artifacts[d]['kind'] for d in task.get('depends_on', [])}
+            if not required.get(task['kind'], set()).issubset(kinds):
+                raise ValueError('필수 선행 결과가 누락됐습니다: ' + task['kind'])
+    if any(t['kind'] == 'draft' for t in assignments) and len(assignments) != 1:
+        raise ValueError('집필·수정은 독립 라운드에서 실행해야 합니다.')
+    return plan
+
+
+def full_reference_parts(agent, session, worker_id):
+    """Scan all available source text in bounded batches, without top-k retrieval."""
+    parts = []
+    for match in re.finditer(r'<REFERENCE_DATA\b([^>]*)>(.*?)</REFERENCE_DATA>', agent.get('system_prompt', ''), re.S):
+        parts.append(('내장 자료 ' + match.group(1), match.group(2)))
+    if agent.get('rag_enabled'):
+        for f in agent.get('rag_files', []):
+            parts.append((f['name'], extract_text_from_file(f)))
+    if agent_uses_notion(agent):
+        token = str(st.session_state.get('notion_api_key', '')).strip()
+        for ref in agent.get('notion_sources', []):
+            source = fetch_notion_source(token, ref)
+            
+            if 'truncated' in source['text'].lower() or '읽을 수 있는 본문 텍스트가 없습니다' in source['text']:
+                raise ValueError('Notion 자료가 잘렸거나 비어 있습니다. 페이지 범위를 나눠 등록하세요.')
+            parts.append(('Notion ' + source['label'], source['text']))
+    for i, text in enumerate(session.get('execution_context_by_target', {}).get(worker_id, [])):
+        parts.append((f'실행자료 {i+1}', text))
+    return parts
+
+
+def run_managed_workflow(client, manager, session, feedback=''):
+    registry = session_worker_registry(session)
+    by_key = {r['worker_key']: r for r in registry}
+    engine = session.setdefault('engine', {'artifacts': {}, 'draft_version': 0, 'reviews': {}, 'status': 'running'})
+    artifacts = engine['artifacts']
+    steps, decisions, outputs = [], [], {}
+    revisions = 0
+    request = session.get('original_user_prompt', '')
+    contract = '''Runtime contract (takes precedence over examples in configuration):
+Return ONLY JSON: {"action":"delegate|final|needs_input","message":"사용자 안내","assignments":[{"worker_key":"worker_1","kind":"intake|analysis|candidates|selection_review|strategy|draft|review","task":"구체적 지시","depends_on":["a1"]}]}
+Use actual Worker keys. Plan ONLY the next ready round. Completed artifacts are supplied; never assume unexecuted work.
+For 자기소개서: intake+job analysis -> candidates -> independent selection_review -> strategy -> draft -> separate fact review and reader review -> revise if needed. Candidate output must contain evidence only, without scores/ranking/old polished prose. selection_review and strategy then decide.
+Do not repeat completed work unless current feedback changes it. New experience feedback requires intake and candidate re-evaluation. Every changed draft requires fresh reviews.
+Use needs_input for material missing user information; do not ask for permission between routine stages. Use final only when the requested deliverable is complete. For explanation-only feedback, final may explain existing results without altering a draft.
+'''
+    # Routing/planning receives clean role descriptions, not full embedded personal source data.
+    roster = [{'worker_key': r['worker_key'], 'name': r['name'], 'role': role_description(st.session_state.agents[r['agent_id']]), 'extra': r['additional_prompt']} for r in registry]
+    policy_key = 'manager_routing_prompt' if feedback else 'manager_planning_prompt'
+    planner = dict(manager)
+    planner['system_prompt'] = role_description(manager) + '\n' + session.get(policy_key, '') + '\n[최종 판단 기준]\n' + session.get('manager_synthesis_prompt','') + '\n' + contract
+    validation_error = ''
+    invalid_plans = 0
+    for round_index in range(MAX_AUTO_ROUNDS):
+        # Keep complete evidence; fail explicitly instead of silently dropping the middle.
+        planning = json.dumps({'request': request, 'feedback': feedback, 'workers': roster, 'artifacts': artifacts,
+                               'draft_version': engine['draft_version'], 'reviews': engine['reviews'],
+                               'validation_error': validation_error, 'manager_input_files': session.get('execution_context_by_target', {}).get('hier_manager', []), 'source_inventory': {r['name']: [f.get('name','') for f in st.session_state.agents[r['agent_id']].get('rag_files', [])] + st.session_state.agents[r['agent_id']].get('notion_sources', []) + session.get('execution_filenames_by_target',{}).get(r['worker_id'], []) for r in registry if re.match(r'W1(?:\s|$)',r['name'])}}, ensure_ascii=False)
+        if len(planning) > MAX_RUNTIME_INPUT_CHARS:
+            engine['status'] = 'blocked'
+            return '자료가 입력 한도를 초과했습니다. 원문을 잘라 계속하지 않았습니다. 자료 범위를 나눠 실행해 주세요.', steps, decisions, outputs
+        plan = runtime_json(client, planner, planning, contract)
+        try:
+            validate_plan(plan, registry, artifacts)
+        except ValueError as exc:
+            invalid_plans += 1
+            if invalid_plans > 2:
+                raise ValueError('실행 가능한 계획을 만들지 못했습니다: ' + str(exc))
+            validation_error = str(exc)
+            continue
+        validation_error = ''
+        decisions.append(plan)
+        if plan['action'] == 'needs_input':
+            engine['status'] = 'needs_input'
+            return plan.get('message', '추가 입력이 필요합니다.'), steps, decisions, outputs
+        if plan['action'] == 'final':
+            version = engine['draft_version']
+            reviews = engine['reviews'].get(str(version), {})
+            if version and (len(reviews) < 2 or not all(v['passed'] for v in reviews.values()) or not all(c['within_limit'] for c in engine.get('counts', []))):
+                validation_error = '현재 초안의 모든 문항에 명시된 분량 제한과 서로 다른 검토자 2명의 통과가 필요합니다. 제한이 없으면 사용자에게 확인하세요. 실패하면 수정 후 재검토하거나 needs_input으로 종료하세요.'
+                continue
+            current_draft = next((a for a in reversed(list(artifacts.values())) if a['kind'] == 'draft'), None)
+            if current_draft:
+                # Manager cannot silently rewrite a reviewed draft in synthesis.
+                engine['status'] = 'complete'
+                return current_draft['output'] + '\n\n---\n검토 완료: 초안 v' + str(version) + '\n' + plan.get('message', '') + '\n\n문항별 계수: ' + json.dumps(engine.get('counts',[]),ensure_ascii=False), steps, decisions, outputs
+            final_agent = dict(manager)
+            text, result = execute_agent_stage(client, final_agent, planning,
+                session.get('manager_synthesis_prompt', '') + '\n현재 완료된 산출물만 종합하라. 미작성 초안을 최종안으로 만들지 말라.',
+                'hier_manager', 'Manager Synthesis', session.get('execution_context_by_target'), session.get('execution_filenames_by_target'))
+            steps.append(result)
+            engine['status'] = 'complete'
+            return text, steps, decisions, outputs
+        # Snapshot dependencies: same-round Workers cannot consume one another's output.
+        for assignment in plan['assignments']:
+            r = by_key[assignment['worker_key']]
+            agent = dict(st.session_state.agents[r['agent_id']])
+            kind = assignment['kind']
+            if kind == 'draft' and engine['draft_version']:
+                revisions += 1
+                if revisions > MAX_AUTO_REVISIONS:
+                    engine['status'] = 'needs_input'
+                    draft = next(a for a in reversed(list(artifacts.values())) if a['kind'] == 'draft')
+                    return '확인 필요 초안 — 자동 수정 2회에 도달했습니다.\n\n' + draft['output'], steps, decisions, outputs
+            deps = {d: artifacts[d] for d in assignment.get('depends_on', [])}
+            payload = {'request': request, 'feedback': feedback, 'task': assignment['task'], 'input_artifacts': deps}
+            if kind == 'review':
+                targets = [a for a in deps.values() if a['kind'] == 'draft']
+                if len(targets) != 1 or targets[0]['draft_version'] != engine['draft_version']:
+                    raise ValueError('검토 대상이 최신 초안 한 개가 아닙니다.')
+                if targets[0]['worker_id'] == r['worker_id']:
+                    raise ValueError('집필자는 자신의 초안을 최종 검증할 수 없습니다.')
+                # Exclude other reviews even if Manager accidentally requests them.
+                payload['input_artifacts'] = {d:a for d,a in deps.items() if a['kind'] not in ('review', 'selection_review')}
+            instruction = r['additional_prompt'] + '\n' + assignment['task']
+            if kind == 'candidates':
+                instruction += '\n후보별 동일 형식의 사실과 한계만 출력한다. 점수·추천순위·기존 완성문장은 제외한다.'
+            agent['system_prompt'] = role_description(agent)
+            if kind == 'candidates':
+                agent['system_prompt'] += '\n[현재는 후보 준비 단계] 이 단계에서는 정규화된 사실과 한계만 반환한다. 기존 지침의 점수·추천·서사 선정은 이후 strategy 단계에서 수행한다.'
+            if kind == 'selection_review':
+                agent['system_prompt'] += '\n[현재는 독립 소재 평가] 제공된 정규화 후보를 평가하고 이전 Manager 의견이나 기존 글의 문체를 추정하지 않는다.'
+            st.caption(f"단계 {round_index+1} · {r['name']} · {kind}")
+            if kind == 'intake':
+                parts = full_reference_parts(st.session_state.agents[r['agent_id']], session, r['worker_id'])
+                mapped = []
+                for label, source_text in parts:
+                    for index in range(0, len(source_text), 30000):
+                        chunk = source_text[index:index+30000]
+                        text, usage = call_agent(client, agent, json.dumps(payload, ensure_ascii=False), instruction + '\n이 자료 범위의 모든 경험과 한계·충돌을 추출하고 출처를 유지하라.', '', label+'\n'+chunk)
+                        mapped.append(f'[{label}: {index}-{index+len(chunk)}]\n{text}')
+                context = '\n\n'.join(mapped)
+                if len(context) > MAX_RUNTIME_INPUT_CHARS:
+                    raise ValueError('경험 추출 결과가 한도를 초과했습니다. 범위를 나누세요. 일부 경험을 버리지 않았습니다.')
+                text, usage = call_agent(client, agent, json.dumps(payload, ensure_ascii=False), instruction, '', context)
+                result = {'agent_name':agent['name'],'model':agent['model'],'output':text,'usage':usage,'stage_label':'전체 경험 정리','execution_files':[p[0] for p in parts]}
+            elif kind == 'review':
+                original_agent = st.session_state.agents[r['agent_id']]
+                embedded = re.findall(r'<REFERENCE_DATA\b[^>]*>(.*?)</REFERENCE_DATA>', original_agent.get('system_prompt',''), re.S)
+                review_files = '\n\n'.join(embedded + session.get('execution_context_by_target', {}).get(r['worker_id'], []))
+                review_rag = ''
+                if agent_has_reference_sources(agent):
+                    review_rag, _, _ = retrieve_rag(client, agent, assignment['task'] + '\n' + targets[0]['output'])
+                review_contract = '\nJSON만 반환: {"passed":true 또는 false,"issues":["구체적 문제"],"assessment":"평가"}. 핵심 오류가 있으면 false.'
+                raw = runtime_json(client, agent, json.dumps(payload, ensure_ascii=False), instruction+review_contract, review_rag, review_files)
+                if type(raw.get('passed')) is not bool or not isinstance(raw.get('issues'), list):
+                    raise ValueError('검토 결과 형식이 잘못되었습니다. 통과 처리하지 않았습니다.')
+                text = json.dumps(raw, ensure_ascii=False)
+                engine['reviews'].setdefault(str(engine['draft_version']), {})[r['worker_id']] = raw
+                result = {'agent_name':agent['name'],'model':agent['model'],'output':text,'stage_label':'초안 검토'}
+            elif kind == 'draft':
+                draft_contract = '\nJSON만 반환: {"questions":[{"id":"1","text":"제출용 본문만","max_chars":null,"count_mode":"including_spaces","limit_source":"제한 조건 원문 또는 미제공"}]}. 실제 문항별 제한이 제공됐으면 max_chars 정수, 공백 제외면 count_mode=excluding_spaces. 제한이 없으면 임의로 만들지 말고 null. 내부 근거는 본문에 넣지 말라.'
+                raw = runtime_json(client, agent, json.dumps(payload, ensure_ascii=False), instruction+draft_contract)
+                questions = raw.get('questions')
+                if not isinstance(questions, list) or not questions:
+                    raise ValueError('문항별 본문 형식이 잘못되었습니다.')
+                blocks, counts = [], []
+                for q in questions:
+                    if not isinstance(q,dict) or not isinstance(q.get('text'),str) or not q['text'].strip():
+                        raise ValueError('비어 있거나 잘못된 문항 본문입니다.')
+                    limit = q.get('max_chars')
+                    if limit is not None and (type(limit) is not int or limit < 1):
+                        raise ValueError('글자 수 제한은 양의 정수 또는 null이어야 합니다.')
+                    mode = q.get('count_mode')
+                    if mode not in ('including_spaces','excluding_spaces'):
+                        raise ValueError('지원하지 않는 글자 수 계산 기준입니다.')
+                    count = len(q['text']) if mode == 'including_spaces' else len(re.sub(r'\s','',q['text']))
+                    counts.append({'id':q.get('id',''), 'count':count,'limit':limit,'mode':mode,
+                                   'within_limit': limit is not None and count <= limit,'source':q.get('limit_source','')})
+                    blocks.append('문항 '+str(q.get('id',''))+'\n'+q['text'])
+                text = '\n\n'.join(blocks)
+                engine['counts'] = counts
+                result = {'agent_name':agent['name'],'model':agent['model'],'output':text,'stage_label':'문항별 집필','counts':counts}
+            else:
+                # Independent selection sees only normalized candidates, never previous final prose.
+                contexts = {} if kind == 'selection_review' else session.get('execution_context_by_target', {})
+                if kind == 'selection_review':
+                    agent['rag_enabled'] = False
+                    agent['notion_enabled'] = False
+                # Embedded references are reference input for relevant roles, not system policy.
+                embedded = re.findall(r'<REFERENCE_DATA\b[^>]*>(.*?)</REFERENCE_DATA>', st.session_state.agents[r['agent_id']].get('system_prompt',''), re.S)
+                contexts = {k:list(v) for k,v in contexts.items()}
+                if embedded and kind != 'selection_review':
+                    contexts.setdefault(r['worker_id'], []).extend(embedded)
+                text, result = execute_agent_stage(client, agent, json.dumps(payload, ensure_ascii=False), instruction, r['worker_id'], kind, contexts, session.get('execution_filenames_by_target'))
+            if kind == 'draft':
+                engine['draft_version'] += 1
+                engine['reviews'][str(engine['draft_version'])] = {}
+            artifact_id = 'a' + str(len(artifacts)+1)
+            artifacts[artifact_id] = {'kind':kind,'worker_id':r['worker_id'],'worker_name':r['name'],'output':text,'depends_on':list(deps),'draft_version':engine['draft_version'], 'counts':engine.get('counts',[]) if kind == 'draft' else []}
+            result.update({'target_id':r['worker_id'],'agent_id':r['agent_id'],'additional_prompt':instruction,'primary_input':json.dumps(payload,ensure_ascii=False)})
+            outputs[r['worker_id']] = text
+            steps.append(result)
+            session.setdefault('latest_worker_outputs', {}).update(outputs)
+    engine['status'] = 'needs_input'
+    return '자동 실행 단계 한도에 도달했습니다. 완료된 결과는 보존했습니다. 다음 단계 진행을 요청해 주세요.', steps, decisions, outputs
+
 
 
 init_state()
@@ -3294,7 +3438,7 @@ with tabs[2]:
                     continue
                 was_truncated = len(extracted_text) > MAX_EXECUTION_FILE_CHARS
                 if was_truncated:
-                    extracted_text = extracted_text[:MAX_EXECUTION_FILE_CHARS]
+                    raise ValueError("파일이 실행 입력 한도를 초과했습니다. 파일을 분할하거나 W1의 RAG 자료로 등록해 전체 분석하세요.")
                 file_context = f"[Execution file: {uploaded.name}]\n{extracted_text}"
                 if was_truncated:
                     file_context += f"\n\n[Notice: file content was truncated to {MAX_EXECUTION_FILE_CHARS:,} characters for this run.]"
@@ -3307,7 +3451,9 @@ with tabs[2]:
                     if remaining <= 0:
                         extraction_warnings.append(f"{uploaded.name}: {target_labels.get(target_id, target_id)}의 파일 입력 한도에 도달했습니다.")
                         continue
-                    execution_context_by_target[target_id].append(file_context[:remaining])
+                    if len(file_context) > remaining:
+                        raise ValueError("대상별 실행자료 한도 초과: 자료를 분할하세요. 일부 내용만 전달하지 않습니다.")
+                    execution_context_by_target[target_id].append(file_context)
                     execution_filenames_by_target[target_id].append(uploaded.name)
                     if len(file_context) > remaining:
                         extraction_warnings.append(f"{uploaded.name}: {target_labels.get(target_id, target_id)}에 전달되는 내용이 일부 잘렸습니다.")
@@ -3316,6 +3462,9 @@ with tabs[2]:
 
         for warning in extraction_warnings:
             st.warning(warning)
+        if extraction_warnings:
+            st.error("자료 전달이 완전하지 않아 실행을 중단했습니다. 위 파일/대상 설정을 수정하세요.")
+            st.stop()
 
         def run_stage(agent, primary_input, additional_prompt, target_id, stage_label):
             return execute_agent_stage(
@@ -3364,125 +3513,28 @@ with tabs[2]:
                 hierarchy = st.session_state.hierarchy
                 manager = st.session_state.agents[hierarchy["manager_agent_id"]]
                 workers = hierarchy.get("workers", [])
-                total_calls = len(workers) + 2
-                completed_calls = 0
-                progress = st.progress(0.0)
-
-                roster_lines = []
-                for idx, worker in enumerate(workers):
-                    worker_agent = st.session_state.agents[worker["agent_id"]]
-                    extra = worker.get("additional_prompt", "").strip() or "No extra worker instruction."
-                    worker_role = clip_memory(worker_agent.get("system_prompt", ""), 2400)
-                    roster_lines.append(
-                        f"Worker {idx+1}: {worker_agent['name']}\n"
-                        f"Agent role/system instruction: {worker_role}\n"
-                        f"Configured worker instruction: {extra}"
-                    )
-                roster = "\n\n".join(roster_lines)
-
-                planning_input = (
-                    f"## Original user request\n{user_prompt.strip()}\n\n"
-                    f"## Available workers\n{roster}"
-                )
-                with st.status(f"Manager · {manager['name']} 작업 분배 계획 수립 중", expanded=True) as status:
-                    manager_plan, plan_result = run_stage(
-                        manager,
-                        planning_input,
-                        hierarchy.get("manager_planning_prompt", DEFAULT_MANAGER_PLANNING_PROMPT),
-                        "hier_manager",
-                        "Manager Planning",
-                    )
-                    results.append(plan_result)
-                    status.update(label=f"Manager · {manager['name']} 작업 분배 완료", state="complete")
-                completed_calls += 1
-                progress.progress(completed_calls / total_calls)
-
-                worker_outputs = []
-                latest_worker_outputs = {}
-                for idx, worker in enumerate(workers):
-                    worker_agent = st.session_state.agents[worker["agent_id"]]
-                    worker_extra = worker.get("additional_prompt", "").strip()
-                    worker_input = (
-                        f"## Original user request\n{user_prompt.strip()}\n\n"
-                        f"## Manager delegation plan\n{manager_plan}\n\n"
-                        f"## Your identity\nYou are Worker {idx+1}: {worker_agent['name']}. "
-                        "Execute the responsibility assigned to you in the manager plan. "
-                        "Focus on your role and return a concrete result for the manager."
-                    )
-                    with st.status(f"Worker {idx+1}/{len(workers)} · {worker_agent['name']} 실행 중", expanded=True) as status:
-                        worker_output, worker_result = run_stage(
-                            worker_agent,
-                            worker_input,
-                            worker_extra,
-                            worker["worker_id"],
-                            f"Worker {idx+1}",
-                        )
-                        results.append(worker_result)
-                        worker_outputs.append(
-                            f"## Worker {idx+1}: {worker_agent['name']}\n{worker_output}"
-                        )
-                        latest_worker_outputs[worker["worker_id"]] = worker_output
-                        status.update(label=f"Worker {idx+1} · {worker_agent['name']} 완료", state="complete")
-                    completed_calls += 1
-                    progress.progress(completed_calls / total_calls)
-
-                synthesis_input = (
-                    f"## Original user request\n{user_prompt.strip()}\n\n"
-                    f"## Manager delegation plan\n{manager_plan}\n\n"
-                    f"## Worker outputs\n" + "\n\n---\n\n".join(worker_outputs)
-                )
-                with st.status(f"Manager · {manager['name']} 최종 종합 중", expanded=True) as status:
-                    final_output, final_result = run_stage(
-                        manager,
-                        synthesis_input,
-                        hierarchy.get("manager_synthesis_prompt", DEFAULT_MANAGER_SYNTHESIS_PROMPT),
-                        "hier_manager",
-                        "Manager Synthesis",
-                    )
-                    results.append(final_result)
-                    status.update(label=f"Manager · {manager['name']} 최종 종합 완료", state="complete")
-                completed_calls += 1
-                progress.progress(completed_calls / total_calls)
-
                 session_id = str(uuid.uuid4())
-                worker_session_configs = [
-                    {
-                        "worker_id": worker["worker_id"],
-                        "agent_id": worker["agent_id"],
-                        "additional_prompt": worker.get("additional_prompt", ""),
-                    }
-                    for worker in workers
-                ]
-
-                st.session_state.hierarchical_session = {
+                session = {
                     "session_id": session_id,
                     "original_user_prompt": user_prompt.strip(),
                     "manager_agent_id": hierarchy["manager_agent_id"],
                     "manager_name": manager["name"],
-                    "manager_planning_prompt": hierarchy.get("manager_planning_prompt", DEFAULT_MANAGER_PLANNING_PROMPT),
-                    "manager_synthesis_prompt": hierarchy.get("manager_synthesis_prompt", DEFAULT_MANAGER_SYNTHESIS_PROMPT),
-                    "manager_routing_prompt": hierarchy.get("manager_routing_prompt", DEFAULT_MANAGER_ROUTING_PROMPT),
-                    "workers": worker_session_configs,
-                    "initial_manager_plan": manager_plan,
-                    "current_final_output": final_output,
-                    "latest_worker_outputs": latest_worker_outputs,
-                    "chat_history": [],
+                    "workers": [dict(w) for w in workers],
+                    "chat_history": [], "latest_worker_outputs": {}, "revisions": [],
                     "execution_context_by_target": execution_context_by_target,
                     "execution_filenames_by_target": execution_filenames_by_target,
-                    "revisions": [
-                        {
-                            "revision": 1,
-                            "kind": "initial",
-                            "title": "최초 실행",
-                            "feedback": "",
-                            "routing": None,
-                            "worker_outputs": dict(latest_worker_outputs),
-                            "final_output": final_output,
-                            "steps": results,
-                        }
-                    ],
                 }
-
+                for key in ("manager_planning_prompt", "manager_synthesis_prompt", "manager_routing_prompt"):
+                    session[key] = hierarchy.get(key, "")
+                st.session_state.hierarchical_session = session
+                with st.status("Manager · 단계별 Workflow 실행 중", expanded=True) as status:
+                    final_output, results, decisions, latest_worker_outputs = run_managed_workflow(client, manager, session)
+                    status.update(label="Manager · " + session.get("engine", {}).get("status", "완료"), state="complete")
+                manager_plan = json.dumps(decisions, ensure_ascii=False, indent=2)
+                session.update({"initial_manager_plan":manager_plan, "current_final_output":final_output,
+                    "latest_worker_outputs":latest_worker_outputs,
+                    "revisions":[{"revision":1,"kind":"initial","title":"최초 실행","feedback":"",
+                    "routing":None,"worker_outputs":dict(latest_worker_outputs),"final_output":final_output,"steps":results}]})
                 st.session_state.last_run = {
                     "mode": "Hierarchical",
                     "session_id": session_id,
