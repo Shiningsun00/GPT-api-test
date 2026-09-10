@@ -17,7 +17,7 @@ from pypdf import PdfReader
 from pptx import Presentation
 
 
-APP_TITLE = "LLM Agent Workflow Studio"
+APP_TITLE = "Agent Workflow Studio"
 DEFAULT_MODEL = "gpt-5.6-luna"
 EMBEDDING_MODEL = "text-embedding-3-small"
 SUPPORTED_TYPES = ["pdf", "docx", "pptx", "xlsx", "csv", "txt", "md"]
@@ -51,176 +51,318 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-        .block-container {padding-top: 1.8rem; padding-bottom: 3rem;}
-        .small-note {font-size: 0.88rem; color: #6b7280;}
+        /* STEP 7 Design System: one visual language across Agent, Workflow and Run. */
+        :root {
+            --aws-radius-sm: 8px;
+            --aws-radius-md: 12px;
+            --aws-radius-lg: 16px;
+            --aws-radius-pill: 999px;
+            --aws-border: rgba(120,120,120,.22);
+            --aws-border-strong: rgba(120,120,120,.34);
+            --aws-shadow-sm: 0 1px 2px rgba(0,0,0,.04);
+            --aws-shadow-md: 0 8px 28px rgba(0,0,0,.07);
+            --aws-muted: .68;
+            --aws-transition: 140ms ease;
+        }
+
+        html {scroll-behavior: smooth;}
+        body,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stSidebar"] {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR", Arial, sans-serif;
+        }
+        [data-testid="stAppViewContainer"] {overflow-x: hidden;}
+        .block-container {
+            max-width: 1480px;
+            padding-top: 1.7rem;
+            padding-bottom: 4rem;
+        }
+
+        h1, h2, h3, h4, h5, h6 {
+            letter-spacing: -.018em;
+            line-height: 1.28;
+        }
+        h1 {font-weight: 760;}
+        h2, h3 {font-weight: 700;}
+        p, li {line-height: 1.62;}
+        .small-note {font-size: .86rem; opacity: var(--aws-muted);}
+
+        /* Tabs */
+        button[data-baseweb="tab"] {
+            min-height: 2.85rem;
+            padding-left: 1rem !important;
+            padding-right: 1rem !important;
+            font-weight: 650 !important;
+        }
+        [data-testid="stTabs"] [data-baseweb="tab-list"] {
+            gap: .3rem;
+            border-bottom: 1px solid var(--aws-border);
+        }
+
+        /* Native Streamlit cards / bordered containers */
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            border-color: var(--aws-border) !important;
+            border-radius: var(--aws-radius-lg) !important;
+            box-shadow: var(--aws-shadow-sm);
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+            border-color: var(--aws-border-strong) !important;
+        }
         .flow-card {
-            border: 1px solid rgba(120,120,120,.25);
-            border-radius: 14px;
-            padding: 14px 16px;
-            margin: 4px 0 8px 0;
+            border: 1px solid var(--aws-border);
+            border-radius: var(--aws-radius-lg);
+            padding: 1rem 1.05rem;
+            margin: .25rem 0 .55rem 0;
+            box-shadow: var(--aws-shadow-sm);
         }
-        .flow-arrow {
-            text-align:center;
-            font-size:1.4rem;
-            opacity:.55;
-            margin:-2px 0 4px 0;
+
+        /* Buttons */
+        [data-testid="stButton"] button,
+        [data-testid="stDownloadButton"] button,
+        [data-testid="stFormSubmitButton"] button {
+            min-height: 2.45rem;
+            border-radius: var(--aws-radius-md) !important;
+            font-weight: 650 !important;
+            transition: transform var(--aws-transition), box-shadow var(--aws-transition), border-color var(--aws-transition);
         }
-        .workflow-kicker {
-            font-size: .76rem;
+        [data-testid="stButton"] button:hover,
+        [data-testid="stDownloadButton"] button:hover,
+        [data-testid="stFormSubmitButton"] button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0,0,0,.08);
+        }
+        [data-testid="stButton"] button:disabled,
+        [data-testid="stFormSubmitButton"] button:disabled {
+            transform: none;
+            box-shadow: none;
+        }
+
+        /* Inputs */
+        div[data-baseweb="input"] > div,
+        div[data-baseweb="select"] > div,
+        [data-testid="stTextArea"] textarea,
+        [data-testid="stNumberInput"] input {
+            border-radius: var(--aws-radius-md) !important;
+        }
+        [data-testid="stTextArea"] textarea {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            line-height: 1.55;
+        }
+        [data-testid="stFileUploaderDropzone"] {
+            border-radius: var(--aws-radius-md) !important;
+            border-color: var(--aws-border-strong) !important;
+        }
+
+        /* Expanders, alerts, status */
+        [data-testid="stExpander"] {
+            border-radius: var(--aws-radius-md) !important;
+        }
+        [data-testid="stExpander"] summary {
+            font-weight: 620;
+        }
+        [data-testid="stAlert"],
+        [data-testid="stStatusWidget"] {
+            border-radius: var(--aws-radius-md) !important;
+        }
+
+        /* Sidebar */
+        [data-testid="stSidebar"] {
+            border-right: 1px solid var(--aws-border);
+        }
+        [data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div {
+            row-gap: .55rem;
+        }
+
+        /* Workflow */
+        .workflow-kicker,
+        .agent-library-kicker {
+            font-size: .74rem;
             letter-spacing: .09em;
             text-transform: uppercase;
             opacity: .58;
-            margin-bottom: .1rem;
+            margin-bottom: .12rem;
+            font-weight: 700;
+        }
+        .flow-arrow {
+            text-align: center;
+            font-size: 1.35rem;
+            opacity: .48;
+            margin: -.1rem 0 .25rem 0;
         }
         .flow-connector {
             text-align: center;
             opacity: .62;
             line-height: 1.15;
-            margin: .35rem 0 .55rem 0;
+            margin: .45rem 0 .7rem 0;
         }
         .flow-connector .arrow {
             display: block;
-            font-size: 1.45rem;
-            margin: .05rem 0;
+            font-size: 1.35rem;
+            margin: .04rem 0;
         }
         .flow-connector .label {
             display: inline-block;
-            font-size: .78rem;
-            letter-spacing: .04em;
-            opacity: .82;
+            font-size: .76rem;
+            letter-spacing: .045em;
+            opacity: .84;
+            font-weight: 650;
         }
         .workflow-help {
             text-align: center;
-            opacity: .7;
-            font-size: .86rem;
-            margin: -.1rem 0 .65rem 0;
+            opacity: .68;
+            font-size: .85rem;
+            margin: -.05rem 0 .8rem 0;
         }
+
+        /* Run / conversation */
         .run-empty-state {
             text-align: center;
-            padding: 2.1rem 1rem 1.45rem 1rem;
+            padding: 2.3rem 1rem 1.55rem 1rem;
         }
         .run-empty-icon {
-            font-size: 2.2rem;
-            margin-bottom: .45rem;
+            font-size: 2.15rem;
+            margin-bottom: .5rem;
         }
         .run-empty-title {
-            font-size: 1.18rem;
-            font-weight: 650;
-            margin-bottom: .25rem;
+            font-size: 1.2rem;
+            font-weight: 720;
+            letter-spacing: -.015em;
+            margin-bottom: .3rem;
         }
         .run-empty-copy {
             opacity: .66;
             font-size: .9rem;
-            line-height: 1.55;
+            line-height: 1.58;
         }
         .run-meta {
             opacity: .68;
-            font-size: .88rem;
-            margin-top: -.25rem;
-            margin-bottom: .45rem;
+            font-size: .86rem;
+            margin-top: -.2rem;
+            margin-bottom: .5rem;
         }
+        [data-testid="stChatMessage"] {
+            padding-top: .65rem;
+            padding-bottom: .65rem;
+        }
+        [data-testid="stChatInput"] {
+            border-radius: var(--aws-radius-lg) !important;
+        }
+
+        /* Activity / Revision */
         .activity-line {
-            padding: .13rem 0;
-            font-size: .92rem;
+            padding: .12rem 0;
+            font-size: .9rem;
         }
         .worklog-note {
             opacity: .68;
-            font-size: .86rem;
-            margin: -.15rem 0 .55rem 0;
+            font-size: .85rem;
+            margin: -.1rem 0 .7rem 0;
+            line-height: 1.55;
         }
         .revision-request {
-            border: 1px solid rgba(120,120,120,.22);
-            border-radius: 10px;
-            padding: .55rem .7rem;
-            margin: .25rem 0 .7rem 0;
-            font-size: .9rem;
+            border: 1px solid var(--aws-border);
+            border-radius: var(--aws-radius-md);
+            padding: .65rem .75rem;
+            margin: .3rem 0 .75rem 0;
+            font-size: .89rem;
             line-height: 1.5;
-            opacity: .9;
+            opacity: .92;
+            box-shadow: var(--aws-shadow-sm);
         }
-        .activity-timeline {
-            padding: .15rem 0 .05rem 0;
-        }
+        .activity-timeline {padding: .2rem 0 .05rem 0;}
         .activity-timeline-row {
             display: flex;
             align-items: flex-start;
             gap: .5rem;
-            font-size: .92rem;
+            font-size: .9rem;
             line-height: 1.45;
         }
         .activity-timeline-marker {
             width: 1.15rem;
             flex: 0 0 1.15rem;
             text-align: center;
-            font-weight: 700;
+            font-weight: 750;
             opacity: .92;
         }
         .activity-timeline-arrow {
             margin-left: .38rem;
             width: 1.15rem;
             text-align: center;
-            opacity: .38;
+            opacity: .34;
             line-height: 1.15;
             padding: .08rem 0;
         }
-        .revision-current {
-            font-weight: 650;
-        }
-        .revision-jump-anchor {
-            height: 0;
-            scroll-margin-top: 1.25rem;
-        }
+        .revision-current {font-weight: 700;}
+        .revision-jump-anchor {height: 0; scroll-margin-top: 1.25rem;}
         a.revision-jump-button {
             position: fixed;
-            right: 2rem;
-            bottom: 5.8rem;
+            right: 1.8rem;
+            bottom: 5.7rem;
             z-index: 1000;
             display: inline-flex;
             align-items: center;
             justify-content: center;
             gap: .35rem;
-            padding: .55rem .85rem;
-            border: 1px solid rgba(120,120,120,.28);
-            border-radius: 999px;
-            background: rgba(255,255,255,.96);
-            color: #31333f !important;
+            padding: .58rem .9rem;
+            border: 1px solid var(--aws-border-strong);
+            border-radius: var(--aws-radius-pill);
+            background: var(--background-color);
+            color: var(--text-color) !important;
             text-decoration: none !important;
-            font-size: .86rem;
-            font-weight: 650;
+            font-size: .84rem;
+            font-weight: 700;
             line-height: 1;
-            box-shadow: 0 4px 16px rgba(0,0,0,.10);
-            backdrop-filter: blur(8px);
+            box-shadow: var(--aws-shadow-md);
+            transition: transform var(--aws-transition), box-shadow var(--aws-transition);
         }
         a.revision-jump-button:hover {
-            border-color: rgba(120,120,120,.52);
-            box-shadow: 0 6px 20px rgba(0,0,0,.14);
+            box-shadow: 0 10px 34px rgba(0,0,0,.11);
             transform: translateY(-1px);
         }
-        @media (max-width: 768px) {
-            a.revision-jump-button {
-                right: 1rem;
-                bottom: 5.5rem;
-                padding: .52rem .72rem;
-            }
-        }
-        .agent-library-kicker {
-            font-size: .78rem;
-            letter-spacing: .08em;
-            text-transform: uppercase;
-            opacity: .6;
-            margin-bottom: .15rem;
-        }
+
+        /* Empty states */
         .agent-empty {
             text-align: center;
             padding: 2.4rem 1.2rem;
-            border: 1px dashed rgba(120,120,120,.28);
-            border-radius: 16px;
+            border: 1px dashed var(--aws-border-strong);
+            border-radius: var(--aws-radius-lg);
             margin: .7rem 0 1rem 0;
         }
         .agent-empty-icon {
             font-size: 2rem;
             margin-bottom: .4rem;
         }
-        div[data-testid="stTextArea"] textarea {font-family: ui-monospace, SFMono-Regular, Menlo, monospace;}
+
+        /* Responsive safety net: desktop-first, graceful stacking on small screens. */
+        @media (max-width: 900px) {
+            .block-container {
+                padding-left: 1rem;
+                padding-right: 1rem;
+                padding-bottom: 5.5rem;
+            }
+            h1 {font-size: 2rem !important;}
+            h2 {font-size: 1.55rem !important;}
+            h3 {font-size: 1.25rem !important;}
+            a.revision-jump-button {
+                right: 1rem;
+                bottom: 5.35rem;
+                padding: .54rem .76rem;
+            }
+        }
+        @media (max-width: 768px) {
+            /* Agent master-detail columns stack automatically in Streamlit. Remove fixed panel height on narrow screens. */
+            div[data-testid="stVerticalBlockBorderWrapper"] {
+                height: auto !important;
+                max-height: none !important;
+            }
+            button[data-baseweb="tab"] {
+                padding-left: .7rem !important;
+                padding-right: .7rem !important;
+                font-size: .88rem !important;
+            }
+            .run-empty-state {padding-top: 1.55rem;}
+            .flow-connector {margin: .3rem 0 .5rem 0;}
+        }
     </style>
     """,
     unsafe_allow_html=True,
@@ -474,7 +616,7 @@ def autoload_repo_workspace():
         stats = restore_workspace_bundle(bundle_path.read_bytes())
         st.session_state.workspace_notice = (
             f"Git 저장소의 {AUTO_WORKSPACE_FILENAME}을 자동으로 불러왔습니다. "
-            f"에이전트 {stats['agents']}개 · "
+            f"Agent {stats['agents']}개 · "
             f"Linear {stats['workflow_steps']} Step · "
             f"Hierarchical Worker {stats.get('hierarchical_workers', 0)}개 · "
             f"RAG 파일 {stats['rag_files']}개"
@@ -786,7 +928,7 @@ def workflow_names() -> list[str]:
     names = []
     for step in st.session_state.workflow:
         agent = st.session_state.agents.get(step["agent_id"])
-        names.append(agent["name"] if agent else "(삭제된 에이전트)")
+        names.append(agent["name"] if agent else "(삭제된 Agent)")
     return names
 
 
@@ -794,7 +936,7 @@ def hierarchy_worker_names() -> list[str]:
     names = []
     for worker in st.session_state.hierarchy.get("workers", []):
         agent = st.session_state.agents.get(worker["agent_id"])
-        names.append(agent["name"] if agent else "(삭제된 에이전트)")
+        names.append(agent["name"] if agent else "(삭제된 Agent)")
     return names
 
 
@@ -1039,7 +1181,7 @@ def _render_step_technical_details(result: dict, index: int):
                 f"{src['rank']}. {src['file']} · chunk {src['chunk_index']} · similarity {src['score']:.3f}"
             )
         if result.get("rag_truncated"):
-            st.warning(f"문서 청크가 많아 에이전트당 최대 {MAX_CHUNKS_PER_AGENT}개까지만 임베딩했습니다.")
+            st.warning(f"문서 청크가 많아 Agent당 최대 {MAX_CHUNKS_PER_AGENT}개까지만 임베딩했습니다.")
 
     if result.get("usage"):
         usage = result["usage"]
@@ -1272,7 +1414,7 @@ def render_hierarchical_feedback_panel(api_key: str):
     current_revision = len(revisions)
 
     if manager is None:
-        st.error("이 세션에서 사용하던 Manager 에이전트가 삭제되었습니다. 새 Manager 중심 Workflow를 실행해 세션을 다시 시작하세요.")
+        st.error("이 세션에서 사용하던 Manager Agent가 삭제되었습니다. 새 Manager 중심 Workflow를 실행해 세션을 다시 시작하세요.")
         return
 
     chat_history = session.setdefault("chat_history", [])
@@ -1595,13 +1737,13 @@ def render_hierarchical_feedback_panel(api_key: str):
 init_state()
 autoload_repo_workspace()
 
-st.title("🧠 LLM Agent Workflow Studio")
+st.title("🧠 Agent Workflow Studio")
 st.caption(
-    "에이전트를 만들고 Linear 또는 Hierarchical 구조로 구성한 뒤, RAG와 실행 파일을 결합해 Workflow를 실행합니다."
+    "Agent를 만들고 Workflow를 구성한 뒤 실행 화면에서 팀과 대화하세요."
 )
 
 with st.sidebar:
-    st.header("OpenAI API")
+    st.header("설정")
     api_key = st.text_input(
         "API Key",
         type="password",
@@ -1630,20 +1772,20 @@ with st.sidebar:
         st.success("RAG 임베딩 캐시를 비웠습니다.")
 
     st.divider()
-    st.markdown("**RAG 지원 파일**")
+    st.markdown("**지원 파일**")
     st.caption("PDF · DOCX · PPTX · XLSX · CSV · TXT · MD")
-    st.caption(f"Embedding: {EMBEDDING_MODEL}")
+    st.caption(f"Embedding 모델: {EMBEDDING_MODEL}")
     st.divider()
-    st.markdown("**에이전트 전체 저장 / 불러오기**")
+    st.markdown("**Workspace 저장 / 불러오기**")
     st.caption(
-        "에이전트 설정·System Prompt·RAG 원본 파일·Linear/Hierarchical Workflow를 "
+        "Agent 설정 · System Prompt · RAG 원본 파일 · Linear/Hierarchical Workflow를 "
         "하나의 ZIP으로 저장합니다. API Key는 저장하지 않습니다."
     )
 
     if st.session_state.agents:
         workspace_bundle = build_workspace_bundle()
         st.download_button(
-            "에이전트 전체 저장 (.zip)",
+            "Workspace 저장 (.zip)",
             data=workspace_bundle,
             file_name=AUTO_WORKSPACE_FILENAME,
             mime="application/zip",
@@ -1651,14 +1793,14 @@ with st.sidebar:
         )
     else:
         st.button(
-            "에이전트 전체 저장 (.zip)",
+            "Workspace 저장 (.zip)",
             disabled=True,
             use_container_width=True,
-            help="저장할 에이전트가 없습니다.",
+            help="저장할 Agent가 없습니다.",
         )
 
     import_file = st.file_uploader(
-        "저장 파일 불러오기",
+        "Workspace 파일 선택",
         type=["zip"],
         key=f"workspace_import_{st.session_state.workspace_import_version}",
         help="이 앱에서 저장한 agent_workspace.zip 파일을 선택하세요.",
@@ -1666,11 +1808,11 @@ with st.sidebar:
 
     if import_file is not None:
         st.warning(
-            "불러오기를 적용하면 현재 에이전트와 Workflow가 저장 파일의 내용으로 교체됩니다."
+            "불러오기를 적용하면 현재 Agent와 Workflow가 Workspace 파일의 내용으로 교체됩니다."
         )
 
     if st.button(
-        "선택한 저장 파일 불러오기",
+        "Workspace 불러오기",
         disabled=(import_file is None),
         use_container_width=True,
         key="apply_workspace_import",
@@ -1678,8 +1820,8 @@ with st.sidebar:
         try:
             stats = restore_workspace_bundle(import_file.getvalue())
             st.session_state.workspace_notice = (
-                f"저장 파일을 불러왔습니다. "
-                f"에이전트 {stats['agents']}개 · "
+                f"Workspace를 불러왔습니다. "
+                f"Agent {stats['agents']}개 · "
                 f"Linear {stats['workflow_steps']} Step · Hierarchical Worker {stats.get('hierarchical_workers', 0)}개 · "
                 f"RAG 파일 {stats['rag_files']}개"
             )
@@ -1687,7 +1829,7 @@ with st.sidebar:
             st.session_state.workspace_import_version += 1
             st.rerun()
         except Exception as exc:
-            st.session_state.workspace_error = f"저장 파일 불러오기 실패: {exc}"
+            st.session_state.workspace_error = f"Workspace 불러오기 실패: {exc}"
 
     if st.session_state.workspace_notice:
         st.success(st.session_state.workspace_notice)
@@ -1696,7 +1838,7 @@ with st.sidebar:
         st.error(st.session_state.workspace_error)
 
     st.divider()
-    st.markdown("**Git Repository 자동 불러오기**")
+    st.markdown("**Git 자동 불러오기**")
     if st.session_state.repo_autoload_found:
         st.success(f"{AUTO_WORKSPACE_FILENAME} 감지됨")
     else:
@@ -1707,17 +1849,17 @@ with st.sidebar:
 
     st.caption(
         "Streamlit Community Cloud가 새 세션을 시작하면 Git Repository의 "
-        f"`{AUTO_WORKSPACE_FILENAME}`을 자동으로 읽어 에이전트와 RAG를 복원합니다."
+        f"`{AUTO_WORKSPACE_FILENAME}`을 자동으로 읽어 Agent와 RAG를 복원합니다."
     )
 
-tabs = st.tabs(["1. 에이전트", "2. Workflow Builder", "3. 실행"])
+tabs = st.tabs(["1. Agent", "2. Workflow", "3. 실행"])
 
 with tabs[0]:
     # STEP 2 refinement: master-detail Agent editor.
     # The left navigator stays visible while the right detail pane scrolls independently,
     # so users can switch Agents without returning to the top of the page.
-    st.subheader("에이전트")
-    st.caption("왼쪽에서 Agent를 선택하고 오른쪽에서 상세 설정을 수정하세요.")
+    st.subheader("Agent")
+    st.caption("왼쪽 Agent 목록에서 대상을 선택하고 오른쪽에서 상세 설정을 수정하세요.")
 
     # Guard against stale UI selection after workspace import or deletion.
     editing_id = st.session_state.get("agent_editing_id")
@@ -1742,7 +1884,7 @@ with tabs[0]:
         with st.container(height=760, border=True):
             nav_head_left, nav_head_right = st.columns([3, 1], vertical_alignment="center")
             with nav_head_left:
-                st.markdown("#### My Agents")
+                st.markdown("#### Agent 목록")
             with nav_head_right:
                 st.caption(f"{len(st.session_state.agents)}개")
 
@@ -1800,7 +1942,7 @@ with tabs[0]:
                         )
                     with col2:
                         new_model = st.text_input(
-                            "Model",
+                            "모델 ID",
                             value=DEFAULT_MODEL,
                             help="예: gpt-5.6-luna, gpt-5.6-terra, gpt-5.6-sol. 계정에서 사용 가능한 다른 모델 ID도 입력할 수 있습니다.",
                             key=f"new_agent_model_{create_form_version}",
@@ -1861,7 +2003,7 @@ with tabs[0]:
                     if not new_name.strip():
                         validation_errors.append("Agent 이름을 입력하세요.")
                     if not new_model.strip():
-                        validation_errors.append("Model ID를 입력하세요.")
+                        validation_errors.append("모델 ID를 입력하세요.")
                     if not new_system.strip():
                         validation_errors.append("System Prompt를 입력하세요.")
 
@@ -1914,7 +2056,7 @@ with tabs[0]:
                     with e_col1:
                         e_name = st.text_input("Agent 이름", value=agent["name"])
                     with e_col2:
-                        e_model = st.text_input("Model ID", value=agent["model"])
+                        e_model = st.text_input("모델 ID", value=agent["model"])
 
                     e_system = st.text_area(
                         "역할 / System Prompt",
@@ -1966,7 +2108,7 @@ with tabs[0]:
 
                 if save_agent:
                     if not e_name.strip() or not e_model.strip() or not e_system.strip():
-                        st.error("이름, Model ID, System Prompt는 비워둘 수 없습니다.")
+                        st.error("이름, 모델 ID, System Prompt는 비워둘 수 없습니다.")
                     else:
                         remaining = [
                             f for f in agent.get("rag_files", [])
@@ -2195,9 +2337,9 @@ with tabs[1]:
 
             with st.expander("⚙ Workflow 옵션", expanded=False):
                 st.session_state.include_original_prompt = st.checkbox(
-                    "후속 단계에도 최초 User Prompt 함께 전달",
+                    "후속 단계에도 최초 요청 함께 전달",
                     value=st.session_state.include_original_prompt,
-                    help="켜면 Step 2부터 '최초 User Prompt + 직전 Output'을 함께 전달합니다. 꺼도 직전 Output은 항상 전달됩니다.",
+                    help="켜면 Step 2부터 '최초 요청 + 직전 Output'을 함께 전달합니다. 꺼도 직전 Output은 항상 전달됩니다.",
                     key="linear_include_original",
                 )
                 st.caption("Workflow 구성을 초기화하려면 아래 버튼을 사용하세요.")
@@ -2578,7 +2720,7 @@ with tabs[2]:
             )
 
     if run_clicked and not user_prompt.strip():
-        st.error("User Prompt가 비어 있습니다. 요청을 작성한 뒤 실행 버튼을 다시 눌러주세요.")
+        st.error("요청이 비어 있습니다. 내용을 작성한 뒤 실행 버튼을 다시 눌러주세요.")
 
     if run_clicked and user_prompt.strip():
         # A fresh Hierarchical run starts a new conversation/revision session.
@@ -2651,7 +2793,7 @@ with tabs[2]:
                 for idx, step in enumerate(st.session_state.workflow):
                     agent = st.session_state.agents.get(step["agent_id"])
                     if not agent:
-                        raise ValueError(f"Step {idx+1}의 에이전트를 찾을 수 없습니다.")
+                        raise ValueError(f"Step {idx+1}의 Agent를 찾을 수 없습니다.")
                     additional_prompt = step.get("additional_prompt", "").strip()
                     if idx == 0:
                         primary_input = user_prompt.strip()
