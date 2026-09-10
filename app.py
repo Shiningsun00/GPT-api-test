@@ -6,6 +6,7 @@ import html
 import io
 import json
 import re
+import time
 import uuid
 import zipfile
 import urllib.error
@@ -1981,6 +1982,8 @@ def render_hierarchical_feedback_panel(api_key: str):
         ],
         "current_final_output": session.get("current_final_output"),
         "engine": session.get("engine", {}),
+        "managed_job": _managed_job_public_snapshot(session.get("managed_job")),
+        "last_managed_job": session.get("last_managed_job"),
     }
     st.download_button(
         "Manager 대화 · Revision 기록 JSON 다운로드",
@@ -1995,95 +1998,49 @@ def render_hierarchical_feedback_panel(api_key: str):
     if notion_required and not notion_token_available:
         st.caption("이 세션의 Agent가 Notion 참고자료를 사용합니다. 후속 작업을 계속하려면 Notion Integration Token을 입력하세요.")
 
+    managed_job = session.get("managed_job")
+    job_pending = isinstance(managed_job, dict) and (managed_job.get("active") or managed_job.get("paused"))
+    if job_pending:
+        st.caption("현재 Manager 작업이 진행 중이거나 체크포인트에서 일시 정지되어 있습니다. 완료/재개 후 새 메시지를 보낼 수 있습니다.")
+
     feedback = st.chat_input(
         "Manager에게 메시지...",
         key="hier_manager_chat_input",
-        disabled=(not bool(api_key)) or (notion_required and not notion_token_available),
+        disabled=(not bool(api_key))
+        or (notion_required and not notion_token_available)
+        or job_pending,
     )
 
     if feedback and feedback.strip():
-        client = OpenAI(api_key=api_key)
         feedback = feedback.strip()
-        previous_final = session.get("current_final_output", "")
-        execution_context_by_target = session.get("execution_context_by_target", {})
-        execution_filenames_by_target = session.get("execution_filenames_by_target", {})
-        routing_steps = []
-
+        # Persist the user's turn before any API call so a Streamlit rerun cannot
+        # lose it. The resumable driver will create the assistant revision only
+        # after the job reaches final/needs_input.
         chat_history.append({"role": "user", "content": feedback})
-        with st.chat_message("user"):
-            st.write(feedback)
 
-        try:
-            # Apply current UI policy to the continuing session explicitly.
-            current_hierarchy = st.session_state.hierarchy
-            for key in ("manager_planning_prompt", "manager_synthesis_prompt", "manager_routing_prompt"):
-                session[key] = current_hierarchy.get(key, session.get(key, ""))
-            extras = {w["worker_id"]: w.get("additional_prompt", "") for w in current_hierarchy.get("workers", [])}
-            for worker in session.get("workers", []):
-                worker["additional_prompt"] = extras.get(worker["worker_id"], worker.get("additional_prompt", ""))
-            with st.status("Manager · 단계별 작업 및 재검토 진행 중", expanded=True) as status:
-                final_output, routing_steps, round_decisions, new_worker_outputs = run_managed_workflow(client, manager, session, feedback)
-                status.update(label="Manager · " + session.get("engine", {}).get("status", "완료"), state="complete")
-            registry_by_key = {item["worker_key"]: item for item in registry}
-            assignments = [a for d in round_decisions for a in d.get("assignments", [])]
-            decision = {"action": "delegate" if assignments else "manager_only", "reason": "의존성에 따른 단계별 실행", "manager_message": "현재 요청 처리", "assignments": assignments}
-            latest_worker_outputs = dict(session.get("latest_worker_outputs", {}))
-            latest_worker_outputs.update(new_worker_outputs)
-            selected_names = [
-                registry_by_key[a["worker_key"]]["name"]
-                for a in assignments
-                if a.get("worker_key") in registry_by_key
-            ]
-            routing_summary = (
-                f"v{current_revision + 1} · "
-                + ("재실행: " + ", ".join(selected_names) if selected_names else "Manager 직접 재판단")
-            )
-            chat_history.append(
-                {
-                    "role": "assistant",
-                    "content": final_output,
-                    "routing_summary": routing_summary,
-                    "manager_message": decision.get("manager_message", ""),
-                }
+        # Apply the current Workflow policy to the continuing session.
+        current_hierarchy = st.session_state.hierarchy
+        for key in ("manager_planning_prompt", "manager_synthesis_prompt", "manager_routing_prompt"):
+            session[key] = current_hierarchy.get(key, session.get(key, ""))
+        extras = {w["worker_id"]: w.get("additional_prompt", "") for w in current_hierarchy.get("workers", [])}
+        for worker in session.get("workers", []):
+            worker["additional_prompt"] = extras.get(
+                worker["worker_id"], worker.get("additional_prompt", "")
             )
 
-            new_revision = current_revision + 1
-            session["current_final_output"] = final_output
-            session["latest_worker_outputs"] = latest_worker_outputs
-            session.setdefault("revisions", []).append(
-                {
-                    "revision": new_revision,
-                    "kind": "feedback",
-                    "title": "사용자 피드백 반영",
-                    "feedback": feedback,
-                    "routing": decision,
-                    "worker_outputs": new_worker_outputs,
-                    "final_output": final_output,
-                    "steps": routing_steps,
-                }
-            )
-
-            if (
-                st.session_state.get("last_run")
-                and st.session_state.last_run.get("mode") == "Hierarchical"
-                and st.session_state.last_run.get("session_id") == session.get("session_id")
-            ):
-                st.session_state.last_run["final_output"] = final_output
-                st.session_state.last_run["revision_count"] = new_revision
-
-            st.session_state.hier_feedback_form_version += 1
-            st.rerun()
-
-        except Exception as exc:
-            if chat_history and chat_history[-1].get("role") == "user" and chat_history[-1].get("content") == feedback:
-                chat_history.pop()
-            st.error(f"Manager 피드백 반영 중 오류가 발생했습니다: {exc}")
+        start_managed_job(session, feedback=feedback, job_kind="feedback")
+        st.session_state.hier_feedback_form_version += 1
+        st.rerun()
 
 
 # Dependency-aware Manager runtime. No Worker output is treated as a system instruction.
 MAX_AUTO_ROUNDS = 18
 MAX_AUTO_REVISIONS = 2
 MAX_RUNTIME_INPUT_CHARS = 350_000
+PLANNER_ARTIFACT_PREVIEW_CHARS = 6_000
+PLANNER_ROLE_PREVIEW_CHARS = 2_200
+OPENAI_REQUEST_TIMEOUT_SECONDS = 180.0
+OPENAI_MAX_RETRIES = 1
 
 
 def role_description(agent: dict) -> str:
@@ -2276,177 +2233,954 @@ def full_reference_parts(agent, session, worker_id):
     return parts
 
 
-def run_managed_workflow(client, manager, session, feedback=''):
+def make_openai_client(api_key: str) -> OpenAI:
+    """Create one bounded OpenAI client for long-running workflow calls.
+
+    A finite timeout prevents a single network/API call from looking like an
+    indefinitely frozen Streamlit app. The SDK still retries transient errors
+    once before surfacing the exception to the resumable job controller.
+    """
+    return OpenAI(
+        api_key=api_key,
+        timeout=OPENAI_REQUEST_TIMEOUT_SECONDS,
+        max_retries=OPENAI_MAX_RETRIES,
+    )
+
+
+def _clip_head_tail(text: str, limit: int) -> str:
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    if limit < 80:
+        return text[:limit]
+    head = int(limit * 0.62)
+    tail = limit - head
+    return text[:head] + "\n...[planner preview clipped]...\n" + text[-tail:]
+
+
+def _planner_artifact_view(artifact_id: str, artifact: dict) -> dict:
+    output = str(artifact.get("output", "") or "")
+    return {
+        "id": artifact_id,
+        "kind": artifact.get("kind"),
+        "worker_name": artifact.get("worker_name"),
+        "draft_version": artifact.get("draft_version", 0),
+        "depends_on": artifact.get("depends_on", []),
+        "output_chars": len(output),
+        "preview": _clip_head_tail(output, PLANNER_ARTIFACT_PREVIEW_CHARS),
+    }
+
+
+def _build_manager_planning_payload(session: dict, registry: list[dict], feedback: str, validation_error: str) -> dict:
+    """Build a bounded Manager view instead of resending every full artifact.
+
+    Workers still receive their full declared dependencies. Only the routing /
+    planning context is compacted, which prevents artifact history from growing
+    quadratically across many Manager rounds.
+    """
+    engine = session.setdefault("engine", {})
+    artifacts = engine.setdefault("artifacts", {})
+
+    artifact_index = []
+    latest_by_kind = {}
+    review_artifacts = []
+    for artifact_id, artifact in artifacts.items():
+        if not isinstance(artifact, dict):
+            continue
+        output = str(artifact.get("output", "") or "")
+        artifact_index.append(
+            {
+                "id": artifact_id,
+                "kind": artifact.get("kind"),
+                "worker_name": artifact.get("worker_name"),
+                "draft_version": artifact.get("draft_version", 0),
+                "depends_on": artifact.get("depends_on", []),
+                "output_chars": len(output),
+            }
+        )
+        latest_by_kind[artifact.get("kind", "unknown")] = _planner_artifact_view(artifact_id, artifact)
+        if artifact.get("kind") == "review":
+            review_artifacts.append(_planner_artifact_view(artifact_id, artifact))
+
+    source_inventory = {}
+    for item in registry:
+        if not re.match(r"W1(?:\s|$)", item.get("name", "")):
+            continue
+        configured = st.session_state.agents.get(item["agent_id"], {})
+        source_inventory[item["name"]] = (
+            [f.get("name", "") for f in configured.get("rag_files", [])]
+            + configured.get("notion_sources", [])
+            + session.get("execution_filenames_by_target", {}).get(item["worker_id"], [])
+        )
+
+    return {
+        "request": session.get("original_user_prompt", ""),
+        "feedback": feedback,
+        "workers": [
+            {
+                "worker_key": item["worker_key"],
+                "name": item["name"],
+                "role": _clip_head_tail(
+                    role_description(st.session_state.agents[item["agent_id"]]),
+                    PLANNER_ROLE_PREVIEW_CHARS,
+                ),
+                "extra": _clip_head_tail(item.get("additional_prompt", ""), PLANNER_ROLE_PREVIEW_CHARS),
+            }
+            for item in registry
+        ],
+        "artifact_index": artifact_index,
+        "latest_artifacts": latest_by_kind,
+        "review_artifacts": review_artifacts[-4:],
+        "draft_version": engine.get("draft_version", 0),
+        "reviews": engine.get("reviews", {}),
+        "counts": engine.get("counts", []),
+        "validation_error": validation_error,
+        "manager_input_file_names": session.get("execution_filenames_by_target", {}).get("hier_manager", []),
+        "source_inventory": source_inventory,
+    }
+
+
+def _set_engine_progress(
+    engine: dict,
+    *,
+    phase: str,
+    label: str,
+    round_number: int,
+    worker_name: str = "",
+    kind: str = "",
+    last_artifact_id: str = "",
+) -> None:
+    engine["progress"] = {
+        "phase": phase,
+        "label": label,
+        "round": round_number,
+        "worker_name": worker_name,
+        "kind": kind,
+        "last_artifact_id": last_artifact_id or engine.get("progress", {}).get("last_artifact_id", ""),
+        "updated_at": time.time(),
+    }
+
+
+def start_managed_job(session: dict, feedback: str = "", job_kind: str = "initial") -> dict:
+    """Create a resumable Manager job persisted in Streamlit session state."""
+    engine = session.setdefault("engine", {})
+    engine.setdefault("artifacts", {})
+    engine.setdefault("draft_version", 0)
+    engine.setdefault("reviews", {})
+    engine.setdefault("counts", [])
+    # Important: reset stale needs_input/error state when a new user turn starts.
+    engine["status"] = "running"
+
+    job = {
+        "job_id": str(uuid.uuid4()),
+        "kind": job_kind,
+        "feedback": str(feedback or "").strip(),
+        "base_revision": len(session.get("revisions", [])),
+        "active": True,
+        "paused": False,
+        "phase": "planning",
+        "round_count": 0,
+        "validation_error": "",
+        "pending_plan": None,
+        "pending_assignments": [],
+        "assignment_cursor": 0,
+        "assignment_state": None,
+        "revisions_used": 0,
+        "steps": [],
+        "decisions": [],
+        "outputs": {},
+        "dependency_repairs": [],
+        "error": "",
+        "error_type": "",
+        "terminal_message": "",
+        "terminal_status": "",
+        "last_checkpoint": "Manager 계획 대기",
+        "started_at": time.time(),
+    }
+    session["managed_job"] = job
+    _set_engine_progress(engine, phase="planning", label="Manager가 다음 실행 단계를 판단합니다.", round_number=1)
+    return job
+
+
+def _managed_job_public_snapshot(job: dict | None) -> dict | None:
+    if not isinstance(job, dict):
+        return None
+    return {
+        "job_id": job.get("job_id"),
+        "kind": job.get("kind"),
+        "base_revision": job.get("base_revision"),
+        "active": job.get("active"),
+        "paused": job.get("paused"),
+        "phase": job.get("phase"),
+        "round_count": job.get("round_count"),
+        "assignment_cursor": job.get("assignment_cursor"),
+        "pending_assignment_count": len(job.get("pending_assignments", []) or []),
+        "revisions_used": job.get("revisions_used"),
+        "last_checkpoint": job.get("last_checkpoint"),
+        "error": job.get("error"),
+        "error_type": job.get("error_type"),
+        "started_at": job.get("started_at"),
+    }
+
+
+def _managed_worker_setup(session: dict, registry_item: dict, assignment: dict) -> tuple[dict, dict, str]:
+    agent = dict(st.session_state.agents[registry_item["agent_id"]])
+    kind = assignment["kind"]
+    artifacts = session["engine"]["artifacts"]
+    deps = {d: artifacts[d] for d in assignment.get("depends_on", [])}
+    payload = {
+        "request": session.get("original_user_prompt", ""),
+        "feedback": session.get("managed_job", {}).get("feedback", ""),
+        "task": assignment["task"],
+        "input_artifacts": deps,
+    }
+    instruction = registry_item.get("additional_prompt", "") + "\n" + assignment["task"]
+    if kind == "candidates":
+        instruction += "\n후보별 동일 형식의 사실과 한계만 출력한다. 점수·추천순위·기존 완성문장은 제외한다."
+
+    agent["system_prompt"] = role_description(agent)
+    if kind == "candidates":
+        agent["system_prompt"] += "\n[현재는 후보 준비 단계] 이 단계에서는 정규화된 사실과 한계만 반환한다. 기존 지침의 점수·추천·서사 선정은 이후 strategy 단계에서 수행한다."
+    if kind == "selection_review":
+        agent["system_prompt"] += "\n[현재는 독립 소재 평가] 제공된 정규화 후보를 평가하고 이전 Manager 의견이나 기존 글의 문체를 추정하지 않는다."
+    return agent, payload, instruction
+
+
+def _execute_intake_assignment_tick(
+    client: OpenAI,
+    session: dict,
+    job: dict,
+    registry_item: dict,
+    assignment: dict,
+) -> tuple[str, dict, str] | None:
+    """Run one intake map chunk per Streamlit rerun, then one reduce call.
+
+    Returning None means the assignment is not finished yet; the caller keeps
+    the checkpoint and reruns the script. This makes the heaviest W1 stage
+    resumable instead of one long blocking sequence of API calls.
+    """
+    agent, payload, instruction = _managed_worker_setup(session, registry_item, assignment)
+    parts = full_reference_parts(
+        st.session_state.agents[registry_item["agent_id"]],
+        session,
+        registry_item["worker_id"],
+    )
+    chunks = []
+    for label, source_text in parts:
+        source_text = str(source_text or "")
+        for index in range(0, len(source_text), 30000):
+            chunks.append((label, index, source_text[index:index + 30000]))
+
+    state_key = f"{job.get('round_count')}:{job.get('assignment_cursor')}:{registry_item['worker_key']}:intake"
+    state = job.get("assignment_state")
+    if not isinstance(state, dict) or state.get("key") != state_key:
+        state = {"key": state_key, "chunk_cursor": 0, "mapped": []}
+        job["assignment_state"] = state
+
+    cursor = int(state.get("chunk_cursor", 0))
+    if cursor < len(chunks):
+        label, index, chunk = chunks[cursor]
+        _set_engine_progress(
+            session["engine"],
+            phase="executing",
+            label=f"{registry_item['name']} · 자료 배치 {cursor + 1}/{len(chunks)} 분석 중",
+            round_number=max(job.get("round_count", 1), 1),
+            worker_name=registry_item["name"],
+            kind="intake",
+        )
+        st.caption(f"{registry_item['name']} · 자료 배치 {cursor + 1}/{len(chunks)}")
+        text, _usage = call_agent(
+            client,
+            agent,
+            json.dumps(payload, ensure_ascii=False),
+            instruction + "\n이 자료 범위의 모든 경험과 한계·충돌을 추출하고 출처를 유지하라.",
+            "",
+            label + "\n" + chunk,
+        )
+        state.setdefault("mapped", []).append(f"[{label}: {index}-{index + len(chunk)}]\n{text}")
+        state["chunk_cursor"] = cursor + 1
+        job["last_checkpoint"] = f"{registry_item['name']} 자료 배치 {cursor + 1}/{len(chunks)} 완료"
+        return None
+
+    context = "\n\n".join(state.get("mapped", []))
+    if len(context) > MAX_RUNTIME_INPUT_CHARS:
+        raise ValueError("경험 추출 결과가 한도를 초과했습니다. 범위를 나누세요. 일부 경험을 버리지 않았습니다.")
+
+    _set_engine_progress(
+        session["engine"],
+        phase="executing",
+        label=f"{registry_item['name']} · 전체 경험 통합 중",
+        round_number=max(job.get("round_count", 1), 1),
+        worker_name=registry_item["name"],
+        kind="intake",
+    )
+    text, usage = call_agent(
+        client,
+        agent,
+        json.dumps(payload, ensure_ascii=False),
+        instruction,
+        "",
+        context,
+    )
+    result = {
+        "agent_name": agent["name"],
+        "model": agent["model"],
+        "output": text,
+        "usage": usage,
+        "stage_label": "전체 경험 정리",
+        "execution_files": [part[0] for part in parts],
+    }
+    job["assignment_state"] = None
+    return text, result, instruction
+
+
+def _execute_managed_assignment_once(
+    client: OpenAI,
+    session: dict,
+    registry_item: dict,
+    assignment: dict,
+) -> tuple[str, dict, str]:
+    engine = session["engine"]
+    artifacts = engine["artifacts"]
+    kind = assignment["kind"]
+    agent, payload, instruction = _managed_worker_setup(session, registry_item, assignment)
+    deps = {d: artifacts[d] for d in assignment.get("depends_on", [])}
+
+    if kind == "review":
+        targets = [a for a in deps.values() if a["kind"] == "draft"]
+        if len(targets) != 1 or targets[0]["draft_version"] != engine["draft_version"]:
+            raise ValueError("검토 대상이 최신 초안 한 개가 아닙니다.")
+        if targets[0]["worker_id"] == registry_item["worker_id"]:
+            raise ValueError("집필자는 자신의 초안을 최종 검증할 수 없습니다.")
+        payload["input_artifacts"] = {
+            d: a for d, a in deps.items() if a["kind"] not in ("review", "selection_review")
+        }
+        original_agent = st.session_state.agents[registry_item["agent_id"]]
+        embedded = re.findall(
+            r"<REFERENCE_DATA\b[^>]*>(.*?)</REFERENCE_DATA>",
+            original_agent.get("system_prompt", ""),
+            re.S,
+        )
+        review_files = "\n\n".join(
+            embedded + session.get("execution_context_by_target", {}).get(registry_item["worker_id"], [])
+        )
+        review_rag = ""
+        if agent_has_reference_sources(agent):
+            review_rag, _, _ = retrieve_rag(client, agent, assignment["task"] + "\n" + targets[0]["output"])
+        review_contract = "\nJSON만 반환: {\"passed\":true 또는 false,\"issues\":[\"구체적 문제\"],\"assessment\":\"평가\"}. 핵심 오류가 있으면 false."
+        raw = runtime_json(
+            client,
+            agent,
+            json.dumps(payload, ensure_ascii=False),
+            instruction + review_contract,
+            review_rag,
+            review_files,
+        )
+        if type(raw.get("passed")) is not bool or not isinstance(raw.get("issues"), list):
+            raise ValueError("검토 결과 형식이 잘못되었습니다. 통과 처리하지 않았습니다.")
+        text = json.dumps(raw, ensure_ascii=False)
+        engine.setdefault("reviews", {}).setdefault(str(engine["draft_version"]), {})[registry_item["worker_id"]] = raw
+        result = {
+            "agent_name": agent["name"],
+            "model": agent["model"],
+            "output": text,
+            "stage_label": "초안 검토",
+        }
+        return text, result, instruction
+
+    if kind == "draft":
+        draft_contract = "\nJSON만 반환: {\"questions\":[{\"id\":\"1\",\"text\":\"제출용 본문만\",\"max_chars\":null,\"count_mode\":\"including_spaces\",\"limit_source\":\"제한 조건 원문 또는 미제공\"}]}. 실제 문항별 제한이 제공됐으면 max_chars 정수, 공백 제외면 count_mode=excluding_spaces. 제한이 없으면 임의로 만들지 말고 null. 내부 근거는 본문에 넣지 말라."
+        raw = runtime_json(
+            client,
+            agent,
+            json.dumps(payload, ensure_ascii=False),
+            instruction + draft_contract,
+        )
+        questions = raw.get("questions")
+        if not isinstance(questions, list) or not questions:
+            raise ValueError("문항별 본문 형식이 잘못되었습니다.")
+        blocks, counts = [], []
+        for q in questions:
+            if not isinstance(q, dict) or not isinstance(q.get("text"), str) or not q["text"].strip():
+                raise ValueError("비어 있거나 잘못된 문항 본문입니다.")
+            limit = q.get("max_chars")
+            if limit is not None and (type(limit) is not int or limit < 1):
+                raise ValueError("글자 수 제한은 양의 정수 또는 null이어야 합니다.")
+            count_mode = q.get("count_mode")
+            if count_mode not in ("including_spaces", "excluding_spaces"):
+                raise ValueError("지원하지 않는 글자 수 계산 기준입니다.")
+            count = len(q["text"]) if count_mode == "including_spaces" else len(re.sub(r"\s", "", q["text"]))
+            counts.append(
+                {
+                    "id": q.get("id", ""),
+                    "count": count,
+                    "limit": limit,
+                    "mode": count_mode,
+                    "within_limit": limit is not None and count <= limit,
+                    "source": q.get("limit_source", ""),
+                }
+            )
+            blocks.append("문항 " + str(q.get("id", "")) + "\n" + q["text"])
+        text = "\n\n".join(blocks)
+        engine["counts"] = counts
+        result = {
+            "agent_name": agent["name"],
+            "model": agent["model"],
+            "output": text,
+            "stage_label": "문항별 집필",
+            "counts": counts,
+        }
+        return text, result, instruction
+
+    contexts = {} if kind == "selection_review" else session.get("execution_context_by_target", {})
+    if kind == "selection_review":
+        agent["rag_enabled"] = False
+        agent["notion_enabled"] = False
+    embedded = re.findall(
+        r"<REFERENCE_DATA\b[^>]*>(.*?)</REFERENCE_DATA>",
+        st.session_state.agents[registry_item["agent_id"]].get("system_prompt", ""),
+        re.S,
+    )
+    contexts = {k: list(v) for k, v in contexts.items()}
+    if embedded and kind != "selection_review":
+        contexts.setdefault(registry_item["worker_id"], []).extend(embedded)
+    text, result = execute_agent_stage(
+        client,
+        agent,
+        json.dumps(payload, ensure_ascii=False),
+        instruction,
+        registry_item["worker_id"],
+        kind,
+        contexts,
+        session.get("execution_filenames_by_target"),
+    )
+    return text, result, instruction
+
+
+def _classify_managed_error(exc: Exception) -> str:
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    if "ratelimit" in name or "rate limit" in text or "429" in text:
+        return "API Rate Limit"
+    if "quota" in text or "insufficient_quota" in text or "billing" in text:
+        return "API Quota/Credit"
+    if "timeout" in name or "timeout" in text:
+        return "API Timeout"
+    if "connection" in name or "connection" in text or "network" in text:
+        return "Network/API Connection"
+    if "context" in text and ("length" in text or "window" in text):
+        return "Model Context Limit"
+    return "Workflow/Runtime"
+
+
+def run_managed_job_tick(client: OpenAI, manager: dict, session: dict) -> dict:
+    """Advance exactly one checkpoint of a Hierarchical Manager job."""
     registry = session_worker_registry(session)
-    by_key = {r['worker_key']: r for r in registry}
-    engine = session.setdefault('engine', {'artifacts': {}, 'draft_version': 0, 'reviews': {}, 'status': 'running'})
-    artifacts = engine['artifacts']
-    steps, decisions, outputs = [], [], {}
-    revisions = 0
-    request = session.get('original_user_prompt', '')
+    by_key = {r["worker_key"]: r for r in registry}
+    engine = session.setdefault("engine", {})
+    engine.setdefault("artifacts", {})
+    engine.setdefault("draft_version", 0)
+    engine.setdefault("reviews", {})
+    engine.setdefault("counts", [])
+    engine["status"] = "running"
+    artifacts = engine["artifacts"]
+
+    job = session.get("managed_job")
+    if not isinstance(job, dict) or not job.get("active"):
+        return {"state": "idle"}
+
+    feedback = str(job.get("feedback", "") or "")
     contract = '''Runtime contract (takes precedence over examples in configuration):
 Return ONLY JSON: {"action":"delegate|final|needs_input","message":"사용자 안내","assignments":[{"worker_key":"worker_1","kind":"intake|analysis|candidates|selection_review|strategy|draft|review","task":"구체적 지시","depends_on":["a1"]}]}
 Use actual Worker keys. Plan ONLY the next ready round. Completed artifacts are supplied; never assume unexecuted work.
 For 자기소개서: intake+job analysis -> candidates -> independent selection_review -> strategy -> draft -> separate fact review and reader review -> revise if needed. Candidate output must contain evidence only, without scores/ranking/old polished prose. selection_review and strategy then decide.
-Dependency rules: depends_on may reference ONLY completed artifact ids shown in artifacts. selection_review must depend on ONLY the newest candidates artifact; never include intake/analysis/strategy/draft/review. candidates requires completed intake+analysis. strategy requires completed candidates+selection_review. draft requires completed strategy. review must depend on exactly the newest draft artifact.
+Dependency rules: depends_on may reference ONLY completed artifact ids shown in artifact_index. selection_review must depend on ONLY the newest candidates artifact; never include intake/analysis/strategy/draft/review. candidates requires completed intake+analysis. strategy requires completed candidates+selection_review. draft requires completed strategy. review must depend on exactly the newest draft artifact.
+The Manager planning view contains compact previews, not every full artifact. Workers receive the full outputs of the dependencies you declare, so do not request repeated work merely because the preview is shortened.
 Do not repeat completed work unless current feedback changes it. New experience feedback requires intake and candidate re-evaluation. Every changed draft requires fresh reviews.
-Use needs_input for material missing user information; do not ask for permission between routine stages. Use final only when the requested deliverable is complete. For explanation-only feedback, final may explain existing results without altering a draft.
+Use needs_input only when missing user information would materially change the requested deliverable. Do not ask for permission between routine stages. Use final only when the requested deliverable is complete. For explanation-only feedback, final may explain existing results without altering a draft.
 '''
-    # Routing/planning receives clean role descriptions, not full embedded personal source data.
-    roster = [{'worker_key': r['worker_key'], 'name': r['name'], 'role': role_description(st.session_state.agents[r['agent_id']]), 'extra': r['additional_prompt']} for r in registry]
-    policy_key = 'manager_routing_prompt' if feedback else 'manager_planning_prompt'
-    planner = dict(manager)
-    planner['system_prompt'] = role_description(manager) + '\n' + session.get(policy_key, '') + '\n[최종 판단 기준]\n' + session.get('manager_synthesis_prompt','') + '\n' + contract
-    validation_error = ''
-    invalid_plans = 0
-    for round_index in range(MAX_AUTO_ROUNDS):
-        # Keep complete evidence; fail explicitly instead of silently dropping the middle.
-        planning = json.dumps({'request': request, 'feedback': feedback, 'workers': roster, 'artifacts': artifacts,
-                               'draft_version': engine['draft_version'], 'reviews': engine['reviews'],
-                               'validation_error': validation_error, 'manager_input_files': session.get('execution_context_by_target', {}).get('hier_manager', []), 'source_inventory': {r['name']: [f.get('name','') for f in st.session_state.agents[r['agent_id']].get('rag_files', [])] + st.session_state.agents[r['agent_id']].get('notion_sources', []) + session.get('execution_filenames_by_target',{}).get(r['worker_id'], []) for r in registry if re.match(r'W1(?:\s|$)',r['name'])}}, ensure_ascii=False)
-        if len(planning) > MAX_RUNTIME_INPUT_CHARS:
-            engine['status'] = 'blocked'
-            return '자료가 입력 한도를 초과했습니다. 원문을 잘라 계속하지 않았습니다. 자료 범위를 나눠 실행해 주세요.', steps, decisions, outputs
-        plan = runtime_json(client, planner, planning, contract)
-        plan, dependency_repairs = stabilize_plan_dependencies(plan, artifacts)
-        try:
-            validate_plan(plan, registry, artifacts)
-        except ValueError as exc:
-            invalid_plans += 1
-            if invalid_plans > 2:
-                raise ValueError('실행 가능한 계획을 만들지 못했습니다: ' + str(exc))
-            validation_error = str(exc)
-            continue
-        # Count only consecutive invalid plans. A later unrelated planner slip
-        # should not consume the retry budget from an earlier recovered round.
-        invalid_plans = 0
-        validation_error = ''
-        decisions.append(plan)
-        if plan['action'] == 'needs_input':
-            engine['status'] = 'needs_input'
-            return plan.get('message', '추가 입력이 필요합니다.'), steps, decisions, outputs
-        if plan['action'] == 'final':
-            version = engine['draft_version']
-            reviews = engine['reviews'].get(str(version), {})
-            if version and (len(reviews) < 2 or not all(v['passed'] for v in reviews.values()) or not all(c['within_limit'] for c in engine.get('counts', []))):
-                validation_error = '현재 초안의 모든 문항에 명시된 분량 제한과 서로 다른 검토자 2명의 통과가 필요합니다. 제한이 없으면 사용자에게 확인하세요. 실패하면 수정 후 재검토하거나 needs_input으로 종료하세요.'
-                continue
-            current_draft = next((a for a in reversed(list(artifacts.values())) if a['kind'] == 'draft'), None)
-            if current_draft:
-                # Manager cannot silently rewrite a reviewed draft in synthesis.
-                engine['status'] = 'complete'
-                return current_draft['output'] + '\n\n---\n검토 완료: 초안 v' + str(version) + '\n' + plan.get('message', '') + '\n\n문항별 계수: ' + json.dumps(engine.get('counts',[]),ensure_ascii=False), steps, decisions, outputs
-            final_agent = dict(manager)
-            text, result = execute_agent_stage(client, final_agent, planning,
-                session.get('manager_synthesis_prompt', '') + '\n현재 완료된 산출물만 종합하라. 미작성 초안을 최종안으로 만들지 말라.',
-                'hier_manager', 'Manager Synthesis', session.get('execution_context_by_target'), session.get('execution_filenames_by_target'))
-            steps.append(result)
-            engine['status'] = 'complete'
-            return text, steps, decisions, outputs
-        # Snapshot dependencies: same-round Workers cannot consume one another's output.
-        for assignment in plan['assignments']:
-            r = by_key[assignment['worker_key']]
-            agent = dict(st.session_state.agents[r['agent_id']])
-            kind = assignment['kind']
-            if kind == 'draft' and engine['draft_version']:
-                revisions += 1
-                if revisions > MAX_AUTO_REVISIONS:
-                    engine['status'] = 'needs_input'
-                    draft = next(a for a in reversed(list(artifacts.values())) if a['kind'] == 'draft')
-                    return '확인 필요 초안 — 자동 수정 2회에 도달했습니다.\n\n' + draft['output'], steps, decisions, outputs
-            deps = {d: artifacts[d] for d in assignment.get('depends_on', [])}
-            payload = {'request': request, 'feedback': feedback, 'task': assignment['task'], 'input_artifacts': deps}
-            if kind == 'review':
-                targets = [a for a in deps.values() if a['kind'] == 'draft']
-                if len(targets) != 1 or targets[0]['draft_version'] != engine['draft_version']:
-                    raise ValueError('검토 대상이 최신 초안 한 개가 아닙니다.')
-                if targets[0]['worker_id'] == r['worker_id']:
-                    raise ValueError('집필자는 자신의 초안을 최종 검증할 수 없습니다.')
-                # Exclude other reviews even if Manager accidentally requests them.
-                payload['input_artifacts'] = {d:a for d,a in deps.items() if a['kind'] not in ('review', 'selection_review')}
-            instruction = r['additional_prompt'] + '\n' + assignment['task']
-            if kind == 'candidates':
-                instruction += '\n후보별 동일 형식의 사실과 한계만 출력한다. 점수·추천순위·기존 완성문장은 제외한다.'
-            agent['system_prompt'] = role_description(agent)
-            if kind == 'candidates':
-                agent['system_prompt'] += '\n[현재는 후보 준비 단계] 이 단계에서는 정규화된 사실과 한계만 반환한다. 기존 지침의 점수·추천·서사 선정은 이후 strategy 단계에서 수행한다.'
-            if kind == 'selection_review':
-                agent['system_prompt'] += '\n[현재는 독립 소재 평가] 제공된 정규화 후보를 평가하고 이전 Manager 의견이나 기존 글의 문체를 추정하지 않는다.'
-            st.caption(f"단계 {round_index+1} · {r['name']} · {kind}")
-            if kind == 'intake':
-                parts = full_reference_parts(st.session_state.agents[r['agent_id']], session, r['worker_id'])
-                mapped = []
-                for label, source_text in parts:
-                    for index in range(0, len(source_text), 30000):
-                        chunk = source_text[index:index+30000]
-                        text, usage = call_agent(client, agent, json.dumps(payload, ensure_ascii=False), instruction + '\n이 자료 범위의 모든 경험과 한계·충돌을 추출하고 출처를 유지하라.', '', label+'\n'+chunk)
-                        mapped.append(f'[{label}: {index}-{index+len(chunk)}]\n{text}')
-                context = '\n\n'.join(mapped)
-                if len(context) > MAX_RUNTIME_INPUT_CHARS:
-                    raise ValueError('경험 추출 결과가 한도를 초과했습니다. 범위를 나누세요. 일부 경험을 버리지 않았습니다.')
-                text, usage = call_agent(client, agent, json.dumps(payload, ensure_ascii=False), instruction, '', context)
-                result = {'agent_name':agent['name'],'model':agent['model'],'output':text,'usage':usage,'stage_label':'전체 경험 정리','execution_files':[p[0] for p in parts]}
-            elif kind == 'review':
-                original_agent = st.session_state.agents[r['agent_id']]
-                embedded = re.findall(r'<REFERENCE_DATA\b[^>]*>(.*?)</REFERENCE_DATA>', original_agent.get('system_prompt',''), re.S)
-                review_files = '\n\n'.join(embedded + session.get('execution_context_by_target', {}).get(r['worker_id'], []))
-                review_rag = ''
-                if agent_has_reference_sources(agent):
-                    review_rag, _, _ = retrieve_rag(client, agent, assignment['task'] + '\n' + targets[0]['output'])
-                review_contract = '\nJSON만 반환: {"passed":true 또는 false,"issues":["구체적 문제"],"assessment":"평가"}. 핵심 오류가 있으면 false.'
-                raw = runtime_json(client, agent, json.dumps(payload, ensure_ascii=False), instruction+review_contract, review_rag, review_files)
-                if type(raw.get('passed')) is not bool or not isinstance(raw.get('issues'), list):
-                    raise ValueError('검토 결과 형식이 잘못되었습니다. 통과 처리하지 않았습니다.')
-                text = json.dumps(raw, ensure_ascii=False)
-                engine['reviews'].setdefault(str(engine['draft_version']), {})[r['worker_id']] = raw
-                result = {'agent_name':agent['name'],'model':agent['model'],'output':text,'stage_label':'초안 검토'}
-            elif kind == 'draft':
-                draft_contract = '\nJSON만 반환: {"questions":[{"id":"1","text":"제출용 본문만","max_chars":null,"count_mode":"including_spaces","limit_source":"제한 조건 원문 또는 미제공"}]}. 실제 문항별 제한이 제공됐으면 max_chars 정수, 공백 제외면 count_mode=excluding_spaces. 제한이 없으면 임의로 만들지 말고 null. 내부 근거는 본문에 넣지 말라.'
-                raw = runtime_json(client, agent, json.dumps(payload, ensure_ascii=False), instruction+draft_contract)
-                questions = raw.get('questions')
-                if not isinstance(questions, list) or not questions:
-                    raise ValueError('문항별 본문 형식이 잘못되었습니다.')
-                blocks, counts = [], []
-                for q in questions:
-                    if not isinstance(q,dict) or not isinstance(q.get('text'),str) or not q['text'].strip():
-                        raise ValueError('비어 있거나 잘못된 문항 본문입니다.')
-                    limit = q.get('max_chars')
-                    if limit is not None and (type(limit) is not int or limit < 1):
-                        raise ValueError('글자 수 제한은 양의 정수 또는 null이어야 합니다.')
-                    mode = q.get('count_mode')
-                    if mode not in ('including_spaces','excluding_spaces'):
-                        raise ValueError('지원하지 않는 글자 수 계산 기준입니다.')
-                    count = len(q['text']) if mode == 'including_spaces' else len(re.sub(r'\s','',q['text']))
-                    counts.append({'id':q.get('id',''), 'count':count,'limit':limit,'mode':mode,
-                                   'within_limit': limit is not None and count <= limit,'source':q.get('limit_source','')})
-                    blocks.append('문항 '+str(q.get('id',''))+'\n'+q['text'])
-                text = '\n\n'.join(blocks)
-                engine['counts'] = counts
-                result = {'agent_name':agent['name'],'model':agent['model'],'output':text,'stage_label':'문항별 집필','counts':counts}
-            else:
-                # Independent selection sees only normalized candidates, never previous final prose.
-                contexts = {} if kind == 'selection_review' else session.get('execution_context_by_target', {})
-                if kind == 'selection_review':
-                    agent['rag_enabled'] = False
-                    agent['notion_enabled'] = False
-                # Embedded references are reference input for relevant roles, not system policy.
-                embedded = re.findall(r'<REFERENCE_DATA\b[^>]*>(.*?)</REFERENCE_DATA>', st.session_state.agents[r['agent_id']].get('system_prompt',''), re.S)
-                contexts = {k:list(v) for k,v in contexts.items()}
-                if embedded and kind != 'selection_review':
-                    contexts.setdefault(r['worker_id'], []).extend(embedded)
-                text, result = execute_agent_stage(client, agent, json.dumps(payload, ensure_ascii=False), instruction, r['worker_id'], kind, contexts, session.get('execution_filenames_by_target'))
-            if kind == 'draft':
-                engine['draft_version'] += 1
-                engine['reviews'][str(engine['draft_version'])] = {}
-            artifact_id = 'a' + str(len(artifacts)+1)
-            artifacts[artifact_id] = {'kind':kind,'worker_id':r['worker_id'],'worker_name':r['name'],'output':text,'depends_on':list(deps),'draft_version':engine['draft_version'], 'counts':engine.get('counts',[]) if kind == 'draft' else []}
-            result.update({'target_id':r['worker_id'],'agent_id':r['agent_id'],'additional_prompt':instruction,'primary_input':json.dumps(payload,ensure_ascii=False)})
-            outputs[r['worker_id']] = text
-            steps.append(result)
-            session.setdefault('latest_worker_outputs', {}).update(outputs)
-    engine['status'] = 'needs_input'
-    return '자동 실행 단계 한도에 도달했습니다. 완료된 결과는 보존했습니다. 다음 단계 진행을 요청해 주세요.', steps, decisions, outputs
 
+    roster = session_worker_registry(session)
+    policy_key = "manager_routing_prompt" if feedback else "manager_planning_prompt"
+    planner = dict(manager)
+    planner["system_prompt"] = (
+        role_description(manager)
+        + "\n"
+        + session.get(policy_key, "")
+        + "\n[최종 판단 기준]\n"
+        + session.get("manager_synthesis_prompt", "")
+        + "\n"
+        + contract
+    )
+
+    if job.get("phase") == "planning":
+        if int(job.get("round_count", 0)) >= MAX_AUTO_ROUNDS:
+            engine["status"] = "needs_input"
+            message = "자동 실행 단계 한도에 도달했습니다. 완료된 결과는 보존했습니다. 다음 단계 진행을 요청해 주세요."
+            job.update({"active": False, "terminal_message": message, "terminal_status": "needs_input"})
+            return {"state": "terminal", "message": message}
+
+        round_number = int(job.get("round_count", 0)) + 1
+        _set_engine_progress(
+            engine,
+            phase="planning",
+            label=f"Manager · Round {round_number} 다음 단계 판단 중",
+            round_number=round_number,
+        )
+        planning_obj = _build_manager_planning_payload(
+            session,
+            roster,
+            feedback,
+            str(job.get("validation_error", "") or ""),
+        )
+        planning = json.dumps(planning_obj, ensure_ascii=False)
+        if len(planning) > MAX_RUNTIME_INPUT_CHARS:
+            engine["status"] = "blocked"
+            message = "Manager 계획 입력이 한도를 초과했습니다. 원문 산출물은 보존했지만 계획용 요약도 너무 큽니다. 자료 범위를 나눠 실행해 주세요."
+            job.update({"active": False, "terminal_message": message, "terminal_status": "blocked"})
+            return {"state": "terminal", "message": message}
+
+        plan = None
+        last_validation_error = ""
+        for _attempt in range(3):
+            candidate = runtime_json(client, planner, planning, contract)
+            candidate, dependency_repairs = stabilize_plan_dependencies(candidate, artifacts)
+            try:
+                validate_plan(candidate, registry, artifacts)
+                plan = candidate
+                if dependency_repairs:
+                    job.setdefault("dependency_repairs", []).extend(dependency_repairs)
+                break
+            except ValueError as exc:
+                last_validation_error = str(exc)
+                planning_obj["validation_error"] = last_validation_error
+                planning = json.dumps(planning_obj, ensure_ascii=False)
+
+        if plan is None:
+            raise ValueError("실행 가능한 계획을 만들지 못했습니다: " + last_validation_error)
+
+        job["validation_error"] = ""
+        job["round_count"] = round_number
+        job.setdefault("decisions", []).append(plan)
+        job["pending_plan"] = plan
+        job["last_checkpoint"] = f"Manager Round {round_number} 계획 확정"
+
+        if plan["action"] == "needs_input":
+            engine["status"] = "needs_input"
+            message = plan.get("message", "추가 입력이 필요합니다.")
+            job.update({"active": False, "terminal_message": message, "terminal_status": "needs_input"})
+            return {"state": "terminal", "message": message}
+
+        if plan["action"] == "final":
+            version = int(engine.get("draft_version", 0))
+            reviews = engine.get("reviews", {}).get(str(version), {})
+            counts = engine.get("counts", [])
+            if version and (
+                len(reviews) < 2
+                or not all(v.get("passed") for v in reviews.values())
+                or not counts
+                or not all(c.get("within_limit") for c in counts)
+            ):
+                job["validation_error"] = (
+                    "현재 초안의 모든 문항에 명시된 분량 제한과 서로 다른 검토자 2명의 통과가 필요합니다. "
+                    "제한이 없으면 사용자에게 확인하세요. 실패하면 수정 후 재검토하거나 needs_input으로 종료하세요."
+                )
+                job["last_checkpoint"] = f"Manager Round {round_number} final 보류 · 검토 조건 미충족"
+                return {"state": "continue"}
+
+            current_draft = next(
+                (a for a in reversed(list(artifacts.values())) if a.get("kind") == "draft"),
+                None,
+            )
+            if current_draft:
+                engine["status"] = "complete"
+                message = (
+                    current_draft["output"]
+                    + "\n\n---\n검토 완료: 초안 v"
+                    + str(version)
+                    + "\n"
+                    + plan.get("message", "")
+                    + "\n\n문항별 계수: "
+                    + json.dumps(engine.get("counts", []), ensure_ascii=False)
+                )
+                job.update({"active": False, "terminal_message": message, "terminal_status": "complete"})
+                return {"state": "terminal", "message": message}
+
+            final_agent = dict(manager)
+            text, result = execute_agent_stage(
+                client,
+                final_agent,
+                planning,
+                session.get("manager_synthesis_prompt", "")
+                + "\n현재 완료된 산출물의 상태만 종합하라. 미작성 초안을 최종안으로 만들지 말라.",
+                "hier_manager",
+                "Manager Synthesis",
+                session.get("execution_context_by_target"),
+                session.get("execution_filenames_by_target"),
+            )
+            # Do not duplicate the entire compact planning payload in session history.
+            result["primary_input"] = _clip_head_tail(result.get("primary_input", ""), 12000)
+            job.setdefault("steps", []).append(result)
+            engine["status"] = "complete"
+            job.update({"active": False, "terminal_message": text, "terminal_status": "complete"})
+            return {"state": "terminal", "message": text}
+
+        # Delegate: checkpoint the plan before any Worker call.
+        if any(a.get("kind") == "draft" for a in plan.get("assignments", [])) and engine.get("draft_version", 0):
+            job["revisions_used"] = int(job.get("revisions_used", 0)) + 1
+            if job["revisions_used"] > MAX_AUTO_REVISIONS:
+                engine["status"] = "needs_input"
+                draft = next(
+                    (a for a in reversed(list(artifacts.values())) if a.get("kind") == "draft"),
+                    None,
+                )
+                message = "확인 필요 초안 — 자동 수정 2회에 도달했습니다."
+                if draft:
+                    message += "\n\n" + draft.get("output", "")
+                job.update({"active": False, "terminal_message": message, "terminal_status": "needs_input"})
+                return {"state": "terminal", "message": message}
+
+        job["pending_assignments"] = [dict(a) for a in plan.get("assignments", [])]
+        job["assignment_cursor"] = 0
+        job["assignment_state"] = None
+        job["phase"] = "executing"
+        names = [by_key[a["worker_key"]]["name"] for a in job["pending_assignments"] if a.get("worker_key") in by_key]
+        _set_engine_progress(
+            engine,
+            phase="executing",
+            label="실행 대기 · " + (" / ".join(names) if names else "Worker"),
+            round_number=round_number,
+        )
+        return {"state": "continue"}
+
+    if job.get("phase") == "executing":
+        assignments = job.get("pending_assignments", []) or []
+        cursor = int(job.get("assignment_cursor", 0))
+        if cursor >= len(assignments):
+            job["phase"] = "planning"
+            job["pending_assignments"] = []
+            job["assignment_cursor"] = 0
+            job["assignment_state"] = None
+            job["last_checkpoint"] = f"Round {job.get('round_count', 0)} Worker 실행 완료"
+            return {"state": "continue"}
+
+        assignment = assignments[cursor]
+        registry_item = by_key[assignment["worker_key"]]
+        kind = assignment["kind"]
+        _set_engine_progress(
+            engine,
+            phase="executing",
+            label=f"{registry_item['name']} · {kind} 실행 중 ({cursor + 1}/{len(assignments)})",
+            round_number=max(int(job.get("round_count", 1)), 1),
+            worker_name=registry_item["name"],
+            kind=kind,
+        )
+        st.caption(
+            f"Round {job.get('round_count', 1)} · {registry_item['name']} · {kind} · "
+            f"{cursor + 1}/{len(assignments)}"
+        )
+
+        if kind == "intake":
+            executed = _execute_intake_assignment_tick(client, session, job, registry_item, assignment)
+            if executed is None:
+                return {"state": "continue"}
+            text, result, instruction = executed
+        else:
+            text, result, instruction = _execute_managed_assignment_once(
+                client,
+                session,
+                registry_item,
+                assignment,
+            )
+
+        if kind == "draft":
+            engine["draft_version"] = int(engine.get("draft_version", 0)) + 1
+            engine.setdefault("reviews", {})[str(engine["draft_version"])] = {}
+
+        artifact_id = "a" + str(len(artifacts) + 1)
+        artifacts[artifact_id] = {
+            "kind": kind,
+            "worker_id": registry_item["worker_id"],
+            "worker_name": registry_item["name"],
+            "output": text,
+            "depends_on": list(assignment.get("depends_on", [])),
+            "draft_version": engine.get("draft_version", 0),
+            "counts": engine.get("counts", []) if kind == "draft" else [],
+        }
+
+        primary_payload = {
+            "request": session.get("original_user_prompt", ""),
+            "feedback": feedback,
+            "task": assignment["task"],
+            "input_artifacts": {d: artifacts[d] for d in assignment.get("depends_on", [])},
+        }
+        primary_input_full = json.dumps(primary_payload, ensure_ascii=False)
+        result.update(
+            {
+                "target_id": registry_item["worker_id"],
+                "agent_id": registry_item["agent_id"],
+                "additional_prompt": instruction,
+                # Technical history keeps a useful preview instead of duplicating huge deps.
+                "primary_input": _clip_head_tail(primary_input_full, 12000),
+                "primary_input_full_chars": len(primary_input_full),
+                "checkpoint_artifact_id": artifact_id,
+            }
+        )
+        job.setdefault("outputs", {})[registry_item["worker_id"]] = text
+        job.setdefault("steps", []).append(result)
+        session.setdefault("latest_worker_outputs", {}).update(job["outputs"])
+        job["assignment_cursor"] = cursor + 1
+        job["assignment_state"] = None
+        job["last_checkpoint"] = f"{artifact_id} · {registry_item['name']} · {kind} 완료"
+        _set_engine_progress(
+            engine,
+            phase="executing",
+            label=job["last_checkpoint"],
+            round_number=max(int(job.get("round_count", 1)), 1),
+            worker_name=registry_item["name"],
+            kind=kind,
+            last_artifact_id=artifact_id,
+        )
+
+        if job["assignment_cursor"] >= len(assignments):
+            job["phase"] = "planning"
+            job["pending_assignments"] = []
+            job["assignment_cursor"] = 0
+        return {"state": "continue", "artifact_id": artifact_id}
+
+    raise ValueError("알 수 없는 Manager 작업 단계입니다: " + str(job.get("phase")))
+
+
+def _finalize_managed_job(session: dict) -> None:
+    job = session.get("managed_job")
+    if not isinstance(job, dict):
+        return
+
+    final_output = str(job.get("terminal_message", "") or "")
+    terminal_status = str(job.get("terminal_status", "") or "needs_input")
+    engine = session.setdefault("engine", {})
+    engine["status"] = terminal_status
+    _set_engine_progress(
+        engine,
+        phase="terminal",
+        label=("완료" if terminal_status == "complete" else "사용자 확인 필요" if terminal_status == "needs_input" else terminal_status),
+        round_number=max(int(job.get("round_count", 0)), 1),
+        last_artifact_id=engine.get("progress", {}).get("last_artifact_id", ""),
+    )
+
+    decisions = list(job.get("decisions", []) or [])
+    steps = list(job.get("steps", []) or [])
+    outputs = dict(job.get("outputs", {}) or {})
+    session.setdefault("latest_worker_outputs", {}).update(outputs)
+    session["current_final_output"] = final_output
+
+    if job.get("kind") == "initial":
+        manager_plan = json.dumps(decisions, ensure_ascii=False, indent=2)
+        session["initial_manager_plan"] = manager_plan
+        session["revisions"] = [
+            {
+                "revision": 1,
+                "kind": "initial",
+                "title": "최초 실행",
+                "feedback": "",
+                "routing": None,
+                "worker_outputs": outputs,
+                "final_output": final_output,
+                "steps": steps,
+            }
+        ]
+        st.session_state.last_run = {
+            "mode": "Hierarchical",
+            "session_id": session.get("session_id"),
+            "revision_count": 1,
+            "user_prompt": session.get("original_user_prompt", ""),
+            "workflow": {
+                "manager": session.get("manager_name", "Manager"),
+                "workers": hierarchy_worker_names(),
+            },
+            "manager_plan": manager_plan,
+            "steps": steps,
+            "final_output": final_output,
+        }
+    else:
+        registry = session_worker_registry(session)
+        registry_by_key = {item["worker_key"]: item for item in registry}
+        assignments = [a for decision in decisions for a in decision.get("assignments", [])]
+        decision = {
+            "action": "delegate" if assignments else "manager_only",
+            "reason": "의존성에 따른 단계별 실행",
+            "manager_message": "현재 요청 처리",
+            "assignments": assignments,
+        }
+        selected_names = [
+            registry_by_key[a["worker_key"]]["name"]
+            for a in assignments
+            if a.get("worker_key") in registry_by_key
+        ]
+        new_revision = len(session.get("revisions", [])) + 1
+        routing_summary = (
+            f"v{new_revision} · "
+            + ("재실행: " + ", ".join(selected_names) if selected_names else "Manager 직접 재판단")
+        )
+        session.setdefault("chat_history", []).append(
+            {
+                "role": "assistant",
+                "content": final_output,
+                "routing_summary": routing_summary,
+                "manager_message": decision.get("manager_message", ""),
+            }
+        )
+        session.setdefault("revisions", []).append(
+            {
+                "revision": new_revision,
+                "kind": "feedback",
+                "title": "사용자 피드백 반영",
+                "feedback": job.get("feedback", ""),
+                "routing": decision,
+                "worker_outputs": outputs,
+                "final_output": final_output,
+                "steps": steps,
+            }
+        )
+        if (
+            st.session_state.get("last_run")
+            and st.session_state.last_run.get("mode") == "Hierarchical"
+            and st.session_state.last_run.get("session_id") == session.get("session_id")
+        ):
+            st.session_state.last_run["final_output"] = final_output
+            st.session_state.last_run["revision_count"] = new_revision
+            st.session_state.last_run["steps"] = steps
+
+    session["last_managed_job"] = _managed_job_public_snapshot(job)
+    session["managed_job"] = None
+
+
+def render_managed_job_driver(api_key: str, session: dict) -> None:
+    """Run one resumable checkpoint and automatically continue with st.rerun()."""
+    job = session.get("managed_job")
+    if not isinstance(job, dict):
+        return
+
+    engine = session.setdefault("engine", {})
+    progress = engine.get("progress", {}) or {}
+    session_id = session.get("session_id", "session")
+
+    if job.get("paused") or (not job.get("active") and job.get("error")):
+        st.error(
+            "작업이 체크포인트에서 일시 정지되었습니다. 완료된 산출물은 보존되어 있습니다. "
+            "같은 지점부터 다시 시도할 수 있습니다."
+        )
+        st.caption("마지막 체크포인트 · " + str(job.get("last_checkpoint", "없음")))
+        if job.get("error"):
+            st.caption(f"오류 분류 · {job.get('error_type', 'Workflow/Runtime')}")
+            with st.expander("오류 상세", expanded=False):
+                st.code(f"{job.get('error_type', '')}: {job.get('error', '')}")
+        retry_col, cancel_col = st.columns(2)
+        with retry_col:
+            if st.button("▶ 체크포인트부터 다시 시도", use_container_width=True, key=f"resume_job_{session_id}"):
+                job["active"] = True
+                job["paused"] = False
+                job["error"] = ""
+                job["error_type"] = ""
+                engine["status"] = "running"
+                st.rerun()
+        with cancel_col:
+            if st.button("작업 중단", use_container_width=True, key=f"cancel_job_{session_id}"):
+                if job.get("kind") == "feedback":
+                    history = session.get("chat_history", [])
+                    if history and history[-1].get("role") == "user" and history[-1].get("content") == job.get("feedback"):
+                        history.pop()
+                    session["last_managed_job"] = _managed_job_public_snapshot(job)
+                    session["managed_job"] = None
+                    engine["status"] = "needs_input"
+                else:
+                    st.session_state.hierarchical_session = None
+                    if st.session_state.get("last_run", {}).get("mode") == "Hierarchical":
+                        st.session_state.last_run = None
+                st.rerun()
+        return
+
+    if not job.get("active"):
+        return
+
+    if not api_key:
+        job["active"] = False
+        job["paused"] = True
+        job["error_type"] = "Configuration"
+        job["error"] = "OpenAI API Key가 없어 작업을 계속할 수 없습니다."
+        engine["status"] = "error"
+        return
+
+    phase_label = progress.get("label") or job.get("last_checkpoint") or "Manager Workflow 진행 중"
+    round_number = max(int(job.get("round_count", 0)), 0)
+    artifact_count = len(engine.get("artifacts", {}))
+    st.info(
+        f"**이어하기 가능한 실행 중** · Round {round_number}/{MAX_AUTO_ROUNDS} · "
+        f"완료 산출물 {artifact_count}개\n\n현재: {phase_label}"
+    )
+
+    client = make_openai_client(api_key)
+    manager = st.session_state.agents.get(session.get("manager_agent_id"))
+    if manager is None:
+        job["active"] = False
+        job["paused"] = True
+        job["error_type"] = "Configuration"
+        job["error"] = "이 세션의 Manager Agent를 찾을 수 없습니다."
+        engine["status"] = "error"
+        return
+
+    try:
+        with st.status("Manager · 체크포인트 실행 중", expanded=True) as status:
+            outcome = run_managed_job_tick(client, manager, session)
+            if outcome.get("state") == "terminal":
+                status.update(label="Manager · 현재 사용자 턴 처리 완료", state="complete")
+            else:
+                latest = session.get("engine", {}).get("progress", {}).get("label", "다음 단계 준비")
+                status.update(label="체크포인트 저장 · " + latest, state="complete")
+    except Exception as exc:
+        job["active"] = False
+        job["paused"] = True
+        job["error"] = str(exc)
+        job["error_type"] = _classify_managed_error(exc)
+        engine["status"] = "error"
+        _set_engine_progress(
+            engine,
+            phase="error",
+            label="오류로 일시 정지 · " + job["error_type"],
+            round_number=max(int(job.get("round_count", 0)), 1),
+            last_artifact_id=engine.get("progress", {}).get("last_artifact_id", ""),
+        )
+        st.error(f"{job['error_type']} · {exc}")
+        st.caption("완료된 산출물은 유지했습니다. 다음 rerun에서 체크포인트 재시도 버튼을 사용할 수 있습니다.")
+        return
+
+    if outcome.get("state") == "terminal":
+        _finalize_managed_job(session)
+        st.rerun()
+
+    # One checkpoint per script execution. This is the core anti-freeze behavior.
+    st.rerun()
+
+
+def run_managed_workflow(client, manager, session, feedback=""):
+    """Compatibility wrapper for callers that still expect the old API.
+
+    The Streamlit UI does NOT use this blocking wrapper anymore; it uses
+    render_managed_job_driver() so every planning/worker checkpoint is saved.
+    """
+    start_managed_job(session, feedback, "compat")
+    job = session["managed_job"]
+    while job.get("active"):
+        outcome = run_managed_job_tick(client, manager, session)
+        if outcome.get("state") == "terminal":
+            break
+    message = job.get("terminal_message", "")
+    steps = list(job.get("steps", []))
+    decisions = list(job.get("decisions", []))
+    outputs = dict(job.get("outputs", {}))
+    session["last_managed_job"] = _managed_job_public_snapshot(job)
+    session["managed_job"] = None
+    return message, steps, decisions, outputs
 
 
 init_state()
@@ -2477,7 +3211,7 @@ with st.sidebar:
             st.error("API Key를 먼저 입력하세요.")
         else:
             try:
-                OpenAI(api_key=api_key).models.list()
+                make_openai_client(api_key).models.list()
                 st.success("API 연결 성공")
             except Exception as exc:
                 st.error(f"API 연결 실패: {exc}")
@@ -3391,7 +4125,15 @@ with tabs[2]:
     if notion_required:
         base_readiness["Notion 연결"] = notion_token_available
     base_missing = [name for name, ready in base_readiness.items() if not ready]
-    run_disabled = bool(base_missing)
+    active_job = (
+        st.session_state.hierarchical_session.get("managed_job")
+        if active_hier_session else None
+    )
+    job_blocks_new = bool(
+        isinstance(active_job, dict)
+        and (active_job.get("active") or active_job.get("paused"))
+    )
+    run_disabled = bool(base_missing) or job_blocks_new
 
     if base_missing:
         guidance = []
@@ -3405,6 +4147,15 @@ with tabs[2]:
         if notion_required and not notion_token_available:
             guidance.append("이 Workflow의 Agent가 Notion 참고자료를 사용합니다. 왼쪽 사이드바에서 **Notion Integration Token**을 입력하세요.")
         st.warning("**아직 새 작업을 실행할 수 없습니다.**\n\n" + "\n".join(f"- {item}" for item in guidance))
+
+    # Resume one durable Hierarchical checkpoint per Streamlit script run.
+    # A successful checkpoint immediately reruns and continues from session state;
+    # failures pause with a retry button instead of silently losing the turn.
+    if is_hierarchical and active_hier_session:
+        render_managed_job_driver(api_key, st.session_state.hierarchical_session)
+
+    if job_blocks_new:
+        st.caption("진행 중인 Manager 작업이 있어 새 작업 시작은 잠시 비활성화됩니다.")
 
     # A completed Manager session keeps the new-task composer available, but out of the main conversation.
     composer_context = (
@@ -3518,7 +4269,7 @@ with tabs[2]:
         if mode == "Hierarchical":
             st.session_state.hierarchical_session = None
 
-        client = OpenAI(api_key=api_key)
+        client = make_openai_client(api_key)
         results = []
         previous_output = None
 
@@ -3624,34 +4375,34 @@ with tabs[2]:
                     "manager_agent_id": hierarchy["manager_agent_id"],
                     "manager_name": manager["name"],
                     "workers": [dict(w) for w in workers],
-                    "chat_history": [], "latest_worker_outputs": {}, "revisions": [],
+                    "chat_history": [],
+                    "latest_worker_outputs": {},
+                    "revisions": [],
+                    "current_final_output": "",
                     "execution_context_by_target": execution_context_by_target,
                     "execution_filenames_by_target": execution_filenames_by_target,
                 }
                 for key in ("manager_planning_prompt", "manager_synthesis_prompt", "manager_routing_prompt"):
                     session[key] = hierarchy.get(key, "")
+
+                # Persist the entire session before the first Manager API call.
+                # The driver advances one planning/worker checkpoint per rerun.
                 st.session_state.hierarchical_session = session
-                with st.status("Manager · 단계별 Workflow 실행 중", expanded=True) as status:
-                    final_output, results, decisions, latest_worker_outputs = run_managed_workflow(client, manager, session)
-                    status.update(label="Manager · " + session.get("engine", {}).get("status", "완료"), state="complete")
-                manager_plan = json.dumps(decisions, ensure_ascii=False, indent=2)
-                session.update({"initial_manager_plan":manager_plan, "current_final_output":final_output,
-                    "latest_worker_outputs":latest_worker_outputs,
-                    "revisions":[{"revision":1,"kind":"initial","title":"최초 실행","feedback":"",
-                    "routing":None,"worker_outputs":dict(latest_worker_outputs),"final_output":final_output,"steps":results}]})
+                start_managed_job(session, feedback="", job_kind="initial")
                 st.session_state.last_run = {
                     "mode": "Hierarchical",
                     "session_id": session_id,
-                    "revision_count": 1,
+                    "revision_count": 0,
                     "user_prompt": user_prompt.strip(),
                     "workflow": {
                         "manager": manager["name"],
                         "workers": hierarchy_worker_names(),
                     },
-                    "manager_plan": manager_plan,
-                    "steps": results,
-                    "final_output": final_output,
+                    "manager_plan": "",
+                    "steps": [],
+                    "final_output": "작업 진행 중 · 체크포인트가 생성되었습니다.",
                 }
+                st.rerun()
 
         except Exception as exc:
             st.error(f"Workflow 실행 중 오류가 발생했습니다: {exc}")
