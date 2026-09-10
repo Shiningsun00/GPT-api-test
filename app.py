@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import uuid
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,9 @@ SUPPORTED_TYPES = ["pdf", "docx", "pptx", "xlsx", "csv", "txt", "md"]
 MAX_CHUNKS_PER_AGENT = 300
 CHUNK_SIZE = 2800
 CHUNK_OVERLAP = 350
+
+WORKSPACE_SCHEMA_VERSION = 1
+AUTO_WORKSPACE_FILENAME = "agent_workspace.zip"
 
 
 st.set_page_config(
@@ -61,10 +65,202 @@ def init_state():
         "last_run": None,
         "include_original_prompt": True,
         "create_agent_form_version": 0,
+        "workspace_import_version": 0,
+        "workspace_notice": "",
+        "workspace_error": "",
+        "repo_autoload_checked": False,
+        "repo_autoload_found": False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+
+
+def _safe_archive_name(name: str) -> str:
+    """Keep only the filename part so uploaded names cannot create archive paths."""
+    cleaned = Path(name).name.strip() or "file"
+    return cleaned.replace("\\", "_").replace("/", "_")
+
+
+def build_workspace_bundle() -> bytes:
+    """
+    Export all agents + RAG source files + Linear Workflow into one ZIP.
+    OpenAI API keys and previous run results are intentionally excluded.
+    """
+    buffer = io.BytesIO()
+
+    manifest = {
+        "schema_version": WORKSPACE_SCHEMA_VERSION,
+        "app": APP_TITLE,
+        "agents": {},
+        "workflow": st.session_state.workflow,
+        "include_original_prompt": bool(st.session_state.include_original_prompt),
+    }
+
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for agent_id, agent in st.session_state.agents.items():
+            exported_files = []
+
+            for index, file_item in enumerate(agent.get("rag_files", []), start=1):
+                safe_name = _safe_archive_name(file_item["name"])
+                archive_path = (
+                    f"rag_files/{agent_id}/"
+                    f"{index:03d}_{file_item['sha256'][:12]}_{safe_name}"
+                )
+
+                zf.writestr(archive_path, file_item["bytes"])
+                exported_files.append(
+                    {
+                        "name": file_item["name"],
+                        "sha256": file_item["sha256"],
+                        "size": int(file_item["size"]),
+                        "archive_path": archive_path,
+                    }
+                )
+
+            manifest["agents"][agent_id] = {
+                "id": agent.get("id", agent_id),
+                "name": agent.get("name", ""),
+                "model": agent.get("model", DEFAULT_MODEL),
+                "system_prompt": agent.get("system_prompt", ""),
+                "rag_enabled": bool(agent.get("rag_enabled", False)),
+                "rag_top_k": int(agent.get("rag_top_k", 4)),
+                "rag_files": exported_files,
+            }
+
+        zf.writestr(
+            "manifest.json",
+            json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+
+    return buffer.getvalue()
+
+
+def restore_workspace_bundle(bundle_bytes: bytes) -> dict:
+    """
+    Restore a bundle created by build_workspace_bundle().
+    Current agents/workflow are replaced by the saved workspace.
+    """
+    with zipfile.ZipFile(io.BytesIO(bundle_bytes), "r") as zf:
+        try:
+            manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+        except KeyError as exc:
+            raise ValueError("유효한 저장 파일이 아닙니다. manifest.json이 없습니다.") from exc
+
+        version = int(manifest.get("schema_version", 0))
+        if version != WORKSPACE_SCHEMA_VERSION:
+            raise ValueError(
+                f"지원하지 않는 저장 파일 버전입니다. "
+                f"파일 버전={version}, 앱 버전={WORKSPACE_SCHEMA_VERSION}"
+            )
+
+        restored_agents = {}
+
+        for agent_id, saved_agent in manifest.get("agents", {}).items():
+            rag_files = []
+
+            for saved_file in saved_agent.get("rag_files", []):
+                archive_path = saved_file.get("archive_path")
+                if not archive_path:
+                    raise ValueError(
+                        f"{saved_agent.get('name', agent_id)}의 RAG 파일 정보가 손상되었습니다."
+                    )
+
+                try:
+                    data = zf.read(archive_path)
+                except KeyError as exc:
+                    raise ValueError(
+                        f"저장 파일 안에서 RAG 파일을 찾을 수 없습니다: {saved_file.get('name')}"
+                    ) from exc
+
+                actual_sha = hashlib.sha256(data).hexdigest()
+                expected_sha = saved_file.get("sha256")
+                if expected_sha and actual_sha != expected_sha:
+                    raise ValueError(
+                        f"RAG 파일 무결성 검사에 실패했습니다: {saved_file.get('name')}"
+                    )
+
+                rag_files.append(
+                    {
+                        "name": saved_file.get("name", Path(archive_path).name),
+                        "bytes": data,
+                        "sha256": actual_sha,
+                        "size": len(data),
+                    }
+                )
+
+            restored_agents[agent_id] = {
+                "id": saved_agent.get("id", agent_id),
+                "name": saved_agent.get("name", ""),
+                "model": saved_agent.get("model", DEFAULT_MODEL),
+                "system_prompt": saved_agent.get("system_prompt", ""),
+                "rag_enabled": bool(saved_agent.get("rag_enabled", False)),
+                "rag_top_k": int(saved_agent.get("rag_top_k", 4)),
+                "rag_files": rag_files,
+            }
+
+        restored_workflow = []
+        for step in manifest.get("workflow", []):
+            agent_id = step.get("agent_id")
+            if agent_id in restored_agents:
+                restored_workflow.append(
+                    {
+                        "step_id": step.get("step_id") or str(uuid.uuid4()),
+                        "agent_id": agent_id,
+                        "additional_prompt": step.get("additional_prompt", ""),
+                    }
+                )
+
+    st.session_state.agents = restored_agents
+    st.session_state.workflow = restored_workflow
+    st.session_state.include_original_prompt = bool(
+        manifest.get("include_original_prompt", True)
+    )
+    st.session_state.rag_cache = {}
+    st.session_state.last_run = None
+
+    total_rag_files = sum(
+        len(agent.get("rag_files", [])) for agent in restored_agents.values()
+    )
+
+    return {
+        "agents": len(restored_agents),
+        "workflow_steps": len(restored_workflow),
+        "rag_files": total_rag_files,
+    }
+
+
+def autoload_repo_workspace():
+    """
+    On a fresh Streamlit session, automatically restore agent_workspace.zip
+    when that file is committed beside app.py in the deployed Git repository.
+    """
+    if st.session_state.repo_autoload_checked:
+        return
+
+    st.session_state.repo_autoload_checked = True
+    bundle_path = Path(__file__).resolve().parent / AUTO_WORKSPACE_FILENAME
+
+    if not bundle_path.exists():
+        st.session_state.repo_autoload_found = False
+        return
+
+    st.session_state.repo_autoload_found = True
+
+    try:
+        stats = restore_workspace_bundle(bundle_path.read_bytes())
+        st.session_state.workspace_notice = (
+            f"Git 저장소의 {AUTO_WORKSPACE_FILENAME}을 자동으로 불러왔습니다. "
+            f"에이전트 {stats['agents']}개 · "
+            f"Workflow {stats['workflow_steps']} Step · "
+            f"RAG 파일 {stats['rag_files']}개"
+        )
+        st.session_state.workspace_error = ""
+    except Exception as exc:
+        st.session_state.workspace_error = (
+            f"Git 저장소의 {AUTO_WORKSPACE_FILENAME} 자동 불러오기에 실패했습니다: {exc}"
+        )
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -414,6 +610,7 @@ def render_last_run(run_data: dict):
 
 
 init_state()
+autoload_repo_workspace()
 
 st.title("🔗 Linear LLM Workflow Studio")
 st.caption(
@@ -453,7 +650,82 @@ with st.sidebar:
     st.markdown("**RAG 지원 파일**")
     st.caption("PDF · DOCX · PPTX · XLSX · CSV · TXT · MD")
     st.caption(f"Embedding: {EMBEDDING_MODEL}")
-    st.caption("업로드 파일과 에이전트 설정은 현재 브라우저 세션 메모리에만 유지됩니다.")
+    st.divider()
+    st.markdown("**에이전트 전체 저장 / 불러오기**")
+    st.caption(
+        "에이전트 설정·System Prompt·RAG 원본 파일·Linear Workflow를 "
+        "하나의 ZIP으로 저장합니다. API Key는 저장하지 않습니다."
+    )
+
+    if st.session_state.agents:
+        workspace_bundle = build_workspace_bundle()
+        st.download_button(
+            "에이전트 전체 저장 (.zip)",
+            data=workspace_bundle,
+            file_name=AUTO_WORKSPACE_FILENAME,
+            mime="application/zip",
+            use_container_width=True,
+        )
+    else:
+        st.button(
+            "에이전트 전체 저장 (.zip)",
+            disabled=True,
+            use_container_width=True,
+            help="저장할 에이전트가 없습니다.",
+        )
+
+    import_file = st.file_uploader(
+        "저장 파일 불러오기",
+        type=["zip"],
+        key=f"workspace_import_{st.session_state.workspace_import_version}",
+        help="이 앱에서 저장한 agent_workspace.zip 파일을 선택하세요.",
+    )
+
+    if import_file is not None:
+        st.warning(
+            "불러오기를 적용하면 현재 에이전트와 Workflow가 저장 파일의 내용으로 교체됩니다."
+        )
+
+    if st.button(
+        "선택한 저장 파일 불러오기",
+        disabled=(import_file is None),
+        use_container_width=True,
+        key="apply_workspace_import",
+    ):
+        try:
+            stats = restore_workspace_bundle(import_file.getvalue())
+            st.session_state.workspace_notice = (
+                f"저장 파일을 불러왔습니다. "
+                f"에이전트 {stats['agents']}개 · "
+                f"Workflow {stats['workflow_steps']} Step · "
+                f"RAG 파일 {stats['rag_files']}개"
+            )
+            st.session_state.workspace_error = ""
+            st.session_state.workspace_import_version += 1
+            st.rerun()
+        except Exception as exc:
+            st.session_state.workspace_error = f"저장 파일 불러오기 실패: {exc}"
+
+    if st.session_state.workspace_notice:
+        st.success(st.session_state.workspace_notice)
+
+    if st.session_state.workspace_error:
+        st.error(st.session_state.workspace_error)
+
+    st.divider()
+    st.markdown("**Git Repository 자동 불러오기**")
+    if st.session_state.repo_autoload_found:
+        st.success(f"{AUTO_WORKSPACE_FILENAME} 감지됨")
+    else:
+        st.caption(
+            f"GitHub Repository에서 자동으로 불러오려면 다운로드한 파일을 "
+            f"`{AUTO_WORKSPACE_FILENAME}` 이름 그대로 `app.py`와 같은 폴더에 커밋하세요."
+        )
+
+    st.caption(
+        "Streamlit Community Cloud가 새 세션을 시작하면 Git Repository의 "
+        f"`{AUTO_WORKSPACE_FILENAME}`을 자동으로 읽어 에이전트와 RAG를 복원합니다."
+    )
 
 tabs = st.tabs(["1. 에이전트", "2. Linear Workflow", "3. 실행"])
 
