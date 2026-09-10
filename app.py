@@ -123,6 +123,48 @@ st.markdown(
             padding: .13rem 0;
             font-size: .92rem;
         }
+        .worklog-note {
+            opacity: .68;
+            font-size: .86rem;
+            margin: -.15rem 0 .55rem 0;
+        }
+        .revision-request {
+            border: 1px solid rgba(120,120,120,.22);
+            border-radius: 10px;
+            padding: .55rem .7rem;
+            margin: .25rem 0 .7rem 0;
+            font-size: .9rem;
+            line-height: 1.5;
+            opacity: .9;
+        }
+        .activity-timeline {
+            padding: .15rem 0 .05rem 0;
+        }
+        .activity-timeline-row {
+            display: flex;
+            align-items: flex-start;
+            gap: .5rem;
+            font-size: .92rem;
+            line-height: 1.45;
+        }
+        .activity-timeline-marker {
+            width: 1.15rem;
+            flex: 0 0 1.15rem;
+            text-align: center;
+            font-weight: 700;
+            opacity: .92;
+        }
+        .activity-timeline-arrow {
+            margin-left: .38rem;
+            width: 1.15rem;
+            text-align: center;
+            opacity: .38;
+            line-height: 1.15;
+            padding: .08rem 0;
+        }
+        .revision-current {
+            font-weight: 650;
+        }
         .agent-library-kicker {
             font-size: .78rem;
             letter-spacing: .08em;
@@ -1041,6 +1083,140 @@ def _revision_worker_names(routing: dict | None, registry: list[dict]) -> list[s
     return names
 
 
+def _compact_single_line(value: str, limit: int = 38) -> str:
+    cleaned = " ".join(str(value or "").split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _revision_summary(revision_data: dict) -> str:
+    if revision_data.get("kind") == "initial" or revision_data.get("revision") == 1:
+        return "최초 실행"
+    feedback = _compact_single_line(revision_data.get("feedback", ""), 34)
+    return feedback or revision_data.get("title", "Revision")
+
+
+def _revision_activity_items(revision_data: dict, registry: list[dict]) -> list[str]:
+    """Build a concise, observable work log without exposing hidden reasoning."""
+    number = revision_data.get("revision", "?")
+    routing = revision_data.get("routing") or {}
+
+    if revision_data.get("kind") == "initial" or number == 1:
+        items = ["Manager 요청 분석 및 작업 분배"]
+        for item in registry:
+            items.append(f"{item.get('name', 'Agent')} 작업 완료")
+        items.append("Manager 결과 검증 및 최종 작성")
+        items.append(f"Revision v{number} 생성")
+        return items
+
+    selected_names = _revision_worker_names(routing, registry)
+    items = ["Manager 피드백 분석"]
+    if selected_names:
+        for name in selected_names:
+            items.append(f"{name}에게 재검토 요청")
+        for name in selected_names:
+            items.append(f"{name} 재검토 완료")
+        items.append("Manager 결과 통합 및 검증")
+    else:
+        items.append("Manager 직접 재검토")
+        items.append("Manager 결과 검증 및 갱신")
+    items.append(f"Revision v{number} 생성")
+    return items
+
+
+def _render_activity_timeline(revision_data: dict, registry: list[dict]):
+    items = _revision_activity_items(revision_data, registry)
+    if not items:
+        st.caption("표시할 작업 기록이 없습니다.")
+        return
+
+    rows = ['<div class="activity-timeline">']
+    for idx, item in enumerate(items):
+        is_last = idx == len(items) - 1
+        marker = "●" if is_last else "✓"
+        row_class = "activity-timeline-row revision-current" if is_last else "activity-timeline-row"
+        rows.append(
+            f'<div class="{row_class}"><span class="activity-timeline-marker">{marker}</span>'
+            f'<span>{html.escape(item)}</span></div>'
+        )
+        if not is_last:
+            rows.append('<div class="activity-timeline-arrow">↓</div>')
+    rows.append('</div>')
+    st.markdown("".join(rows), unsafe_allow_html=True)
+
+
+def render_revision_worklog(session: dict, registry: list[dict]):
+    """Revision navigator + user-facing activity timeline for a Manager session."""
+    revisions = session.get("revisions", [])
+    if not revisions:
+        return
+
+    current_revision = len(revisions)
+    session_id = str(session.get("session_id", "session"))
+
+    with st.expander(f"🧭 작업 기록 · Revision v{current_revision}", expanded=False):
+        st.markdown(
+            '<div class="worklog-note">누가 다시 작업했는지와 결과가 어떻게 버전업됐는지만 보여줍니다. '
+            'Prompt, Token, RAG 같은 기술 정보는 실행 세부 정보에서 확인할 수 있습니다.</div>',
+            unsafe_allow_html=True,
+        )
+
+        activity_col, revision_col = st.columns([1.25, 1], gap="large")
+        nav_indices = list(range(len(revisions) - 1, -1, -1))
+
+        with revision_col:
+            st.markdown("#### Revision History")
+
+            def revision_label(index: int) -> str:
+                revision_data = revisions[index]
+                number = revision_data.get("revision", index + 1)
+                current = " · 현재" if index == len(revisions) - 1 else ""
+                return f"v{number}{current} · {_revision_summary(revision_data)}"
+
+            selected_index = st.radio(
+                "Revision 선택",
+                options=nav_indices,
+                index=0,
+                format_func=revision_label,
+                key=f"revision_nav_{session_id}_{current_revision}",
+                label_visibility="collapsed",
+            )
+
+        selected_revision = revisions[selected_index]
+        selected_number = selected_revision.get("revision", selected_index + 1)
+
+        with activity_col:
+            st.markdown(f"#### Activity · Revision v{selected_number}")
+            feedback_text = selected_revision.get("feedback", "")
+            if feedback_text:
+                st.caption("사용자 요청")
+                safe_feedback = html.escape(_compact_single_line(feedback_text, 180))
+                st.markdown(f'<div class="revision-request">{safe_feedback}</div>', unsafe_allow_html=True)
+            else:
+                st.caption("최초 요청에서 생성된 결과")
+            _render_activity_timeline(selected_revision, registry)
+
+        st.divider()
+        routing = selected_revision.get("routing") or {}
+        selected_names = _revision_worker_names(routing, registry)
+        if selected_revision.get("kind") == "initial" or selected_number == 1:
+            st.caption(f"처리 방식 · 전문 Agent {len(registry)}명 참여 후 Manager 최종 검증")
+        elif selected_names:
+            st.caption("처리 방식 · 재검토 Agent: " + " · ".join(selected_names))
+        else:
+            st.caption("처리 방식 · 추가 Agent 호출 없이 Manager 직접 처리")
+
+        show_result = st.checkbox(
+            "선택한 Revision 결과 보기",
+            key=f"revision_result_{session_id}_{current_revision}_{selected_number}",
+        )
+        if show_result:
+            with st.container(border=True):
+                st.caption(f"Revision v{selected_number} · 당시 Manager 최종 결과")
+                st.write(selected_revision.get("final_output", ""))
+
+
 def render_hierarchical_feedback_panel(api_key: str):
     """Render the whole Hierarchical session as one Manager conversation and accept chat follow-ups."""
     session = st.session_state.get("hierarchical_session")
@@ -1057,6 +1233,7 @@ def render_hierarchical_feedback_panel(api_key: str):
         return
 
     chat_history = session.setdefault("chat_history", [])
+    render_revision_worklog(session, registry)
     st.divider()
 
     # Initial user request + first Manager answer.
@@ -1077,8 +1254,7 @@ def render_hierarchical_feedback_panel(api_key: str):
             st.caption(f"{session.get('manager_name', 'Manager')} · Revision v1")
             st.write(first_revision.get("final_output", session.get("current_final_output", "")))
             worker_count = len(registry)
-            st.caption(f"✓ 전문 Agent {worker_count}명 참여 · Revision v1")
-            render_agent_activity(first_revision.get("steps", []), revision=1)
+            st.caption(f"✓ v1 · 전문 Agent {worker_count}명 참여")
 
         # Every later revision is another user -> Manager turn.
         for revision_data in revisions[1:]:
@@ -1097,36 +1273,14 @@ def render_hierarchical_feedback_panel(api_key: str):
                     st.caption("작업 처리 · " + manager_message)
                 st.write(revision_data.get("final_output", ""))
                 if selected_names:
-                    st.caption("✓ 재검토 Agent · " + " · ".join(selected_names) + f" · Revision v{number}")
+                    st.caption(f"✓ v{number} · 재검토: " + " · ".join(selected_names))
                 else:
-                    st.caption(f"✓ Manager 직접 재판단 · Revision v{number}")
-                render_agent_activity(revision_data.get("steps", []), revision=number if isinstance(number, int) else None)
+                    st.caption(f"✓ v{number} · Manager 직접 처리")
     else:
         with st.chat_message("assistant", avatar="👑"):
             st.write(session.get("current_final_output", ""))
 
-    # Keep history and raw execution data available, but out of the primary conversation.
-    with st.expander(f"📜 Revision History · v{current_revision}", expanded=False):
-        for idx, revision_data in enumerate(reversed(revisions[-10:])):
-            number = revision_data.get("revision", "?")
-            title = revision_data.get("title", "Revision")
-            st.markdown(f"**v{number} · {title}**")
-            if revision_data.get("feedback"):
-                st.caption("사용자 요청")
-                st.write(revision_data["feedback"])
-            routing = revision_data.get("routing") or {}
-            if routing:
-                st.caption("Manager 판단 · " + routing.get("reason", ""))
-                selected_names = _revision_worker_names(routing, registry)
-                if selected_names:
-                    st.caption("재실행 Agent · " + " · ".join(selected_names))
-                else:
-                    st.caption("추가 Agent 실행 없음 · Manager 직접 재판단")
-            st.caption("최종 결과")
-            st.write(revision_data.get("final_output", ""))
-            if idx < min(len(revisions), 10) - 1:
-                st.divider()
-
+    # Raw execution data stays available for debugging, separate from the user-facing work log.
     with st.expander("⚙ 실행 세부 정보", expanded=False):
         for rev_idx, revision_data in enumerate(revisions, start=1):
             number = revision_data.get("revision", rev_idx)
@@ -2225,7 +2379,7 @@ with tabs[2]:
         st.subheader(f"👑 {manager_name} Workflow" if manager_id in st.session_state.agents else "👑 Manager 중심 Workflow")
         meta = f"👑 {manager_name} · 전문 Agent {len(workers)}명"
         if session_revision:
-            meta += f" · v{session_revision}"
+            meta += f" · ● Revision v{session_revision}"
         st.caption(meta)
     else:
         st.subheader("→ 순차 실행 Workflow")
