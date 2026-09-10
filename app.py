@@ -2105,6 +2105,105 @@ def runtime_json(client, agent, text, contract, rag_context="", file_context="")
     raise ValueError('Manager/Worker JSON 형식 오류가 반복되어 중단했습니다. 전체 Worker를 임의 실행하지 않았습니다.')
 
 
+PLAN_REQUIRED_DEP_KINDS = {
+    'candidates': ('intake', 'analysis'),
+    'selection_review': ('candidates',),
+    'strategy': ('candidates', 'selection_review'),
+    'draft': ('strategy',),
+    'review': ('draft',),
+}
+
+
+def _latest_artifact_id(artifacts: dict, kind: str, allowed_ids: list[str] | None = None) -> str | None:
+    """Return the newest artifact id of a kind using insertion order."""
+    allowed = set(allowed_ids) if allowed_ids is not None else None
+    for artifact_id, artifact in reversed(list(artifacts.items())):
+        if allowed is not None and artifact_id not in allowed:
+            continue
+        if isinstance(artifact, dict) and artifact.get('kind') == kind:
+            return artifact_id
+    return None
+
+
+def stabilize_plan_dependencies(plan: dict, artifacts: dict) -> tuple[dict, list[str]]:
+    """Repair only deterministic dependency mistakes before strict validation.
+
+    This does not invent new work or bypass role constraints. It only removes
+    impossible/stale artifact references and binds stages to the newest already
+    completed prerequisite artifact where the dependency is mechanically clear.
+    """
+    if not isinstance(plan, dict) or plan.get('action') != 'delegate':
+        return plan, []
+
+    assignments = plan.get('assignments')
+    if not isinstance(assignments, list):
+        return plan, []
+
+    repaired_plan = dict(plan)
+    repaired_assignments = []
+    repair_notes = []
+
+    for index, original in enumerate(assignments, start=1):
+        if not isinstance(original, dict):
+            repaired_assignments.append(original)
+            continue
+
+        task = dict(original)
+        deps = task.get('depends_on', [])
+        if not isinstance(deps, list):
+            repaired_assignments.append(task)
+            continue
+
+        # Drop nonexistent ids and duplicates. Validation still rejects the plan
+        # if a required prerequisite cannot be recovered from completed artifacts.
+        cleaned = []
+        for dep in deps:
+            if dep in artifacts and dep not in cleaned:
+                cleaned.append(dep)
+
+        kind = task.get('kind')
+        before = list(deps)
+
+        if kind == 'selection_review':
+            # Independent selection must be isolated from intake/analysis/strategy
+            # and from old prose. Use exactly the newest candidate artifact.
+            explicit_candidates = [
+                dep for dep in cleaned
+                if isinstance(artifacts.get(dep), dict) and artifacts[dep].get('kind') == 'candidates'
+            ]
+            selected = _latest_artifact_id(artifacts, 'candidates', explicit_candidates)
+            if selected is None:
+                selected = _latest_artifact_id(artifacts, 'candidates')
+            cleaned = [selected] if selected else []
+
+        elif kind == 'review':
+            # Every review targets one newest draft only. Fact/reference material is
+            # supplied through the reviewer's own reference sources, not as deps.
+            latest_draft = _latest_artifact_id(artifacts, 'draft')
+            cleaned = [latest_draft] if latest_draft else []
+
+        else:
+            # Preserve valid explicit deps, then fill mechanically required kinds
+            # from the newest completed artifact of each type.
+            for required_kind in PLAN_REQUIRED_DEP_KINDS.get(kind, ()):
+                if not any(artifacts[d].get('kind') == required_kind for d in cleaned):
+                    latest = _latest_artifact_id(artifacts, required_kind)
+                    if latest and latest not in cleaned:
+                        cleaned.append(latest)
+
+        task['depends_on'] = cleaned
+        if cleaned != before:
+            repair_notes.append(
+                f"assignment {index} ({kind or 'unknown'}): depends_on {before} -> {cleaned}"
+            )
+        repaired_assignments.append(task)
+
+    repaired_plan['assignments'] = repaired_assignments
+    if repair_notes:
+        repaired_plan['_dependency_repairs'] = repair_notes
+    return repaired_plan, repair_notes
+
+
 def validate_plan(plan, registry, artifacts):
     action = plan.get('action')
     if action not in ('delegate', 'final', 'needs_input'):
@@ -2189,6 +2288,7 @@ def run_managed_workflow(client, manager, session, feedback=''):
 Return ONLY JSON: {"action":"delegate|final|needs_input","message":"사용자 안내","assignments":[{"worker_key":"worker_1","kind":"intake|analysis|candidates|selection_review|strategy|draft|review","task":"구체적 지시","depends_on":["a1"]}]}
 Use actual Worker keys. Plan ONLY the next ready round. Completed artifacts are supplied; never assume unexecuted work.
 For 자기소개서: intake+job analysis -> candidates -> independent selection_review -> strategy -> draft -> separate fact review and reader review -> revise if needed. Candidate output must contain evidence only, without scores/ranking/old polished prose. selection_review and strategy then decide.
+Dependency rules: depends_on may reference ONLY completed artifact ids shown in artifacts. selection_review must depend on ONLY the newest candidates artifact; never include intake/analysis/strategy/draft/review. candidates requires completed intake+analysis. strategy requires completed candidates+selection_review. draft requires completed strategy. review must depend on exactly the newest draft artifact.
 Do not repeat completed work unless current feedback changes it. New experience feedback requires intake and candidate re-evaluation. Every changed draft requires fresh reviews.
 Use needs_input for material missing user information; do not ask for permission between routine stages. Use final only when the requested deliverable is complete. For explanation-only feedback, final may explain existing results without altering a draft.
 '''
@@ -2208,6 +2308,7 @@ Use needs_input for material missing user information; do not ask for permission
             engine['status'] = 'blocked'
             return '자료가 입력 한도를 초과했습니다. 원문을 잘라 계속하지 않았습니다. 자료 범위를 나눠 실행해 주세요.', steps, decisions, outputs
         plan = runtime_json(client, planner, planning, contract)
+        plan, dependency_repairs = stabilize_plan_dependencies(plan, artifacts)
         try:
             validate_plan(plan, registry, artifacts)
         except ValueError as exc:
@@ -2216,6 +2317,9 @@ Use needs_input for material missing user information; do not ask for permission
                 raise ValueError('실행 가능한 계획을 만들지 못했습니다: ' + str(exc))
             validation_error = str(exc)
             continue
+        # Count only consecutive invalid plans. A later unrelated planner slip
+        # should not consume the retry budget from an earlier recovered round.
+        invalid_plans = 0
         validation_error = ''
         decisions.append(plan)
         if plan['action'] == 'needs_input':
