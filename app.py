@@ -60,6 +60,7 @@ def init_state():
         "rag_cache": {},
         "last_run": None,
         "include_original_prompt": True,
+        "create_agent_form_version": 0,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -459,44 +460,79 @@ tabs = st.tabs(["1. 에이전트", "2. Linear Workflow", "3. 실행"])
 with tabs[0]:
     st.subheader("새 LLM 에이전트 만들기")
 
-    with st.form("create_agent_form", clear_on_submit=True):
+    create_form_version = st.session_state.create_agent_form_version
+
+    with st.form(
+        f"create_agent_form_{create_form_version}",
+        clear_on_submit=False,
+        enter_to_submit=False,
+    ):
         col1, col2 = st.columns([1, 1])
         with col1:
-            new_name = st.text_input("에이전트 이름", placeholder="예: 데이터 분석가")
+            new_name = st.text_input(
+                "에이전트 이름",
+                placeholder="예: 데이터 분석가",
+                key=f"new_agent_name_{create_form_version}",
+            )
         with col2:
             new_model = st.text_input(
                 "OpenAI Model ID",
                 value=DEFAULT_MODEL,
                 help="예: gpt-5.6-luna, gpt-5.6-terra, gpt-5.6-sol. 계정에서 사용 가능한 다른 모델 ID도 입력할 수 있습니다.",
+                key=f"new_agent_model_{create_form_version}",
             )
 
         new_system = st.text_area(
             "System Prompt",
             height=180,
             placeholder="이 에이전트의 역할, 판단 기준, 출력 형식, 금지사항 등을 지정하세요.",
+            key=f"new_agent_system_{create_form_version}",
         )
 
         rag_col1, rag_col2 = st.columns([1, 1])
         with rag_col1:
-            new_rag = st.checkbox("RAG 사용")
+            new_rag = st.checkbox(
+                "RAG 사용",
+                key=f"new_agent_rag_{create_form_version}",
+            )
         with rag_col2:
-            new_top_k = st.slider("RAG Top-K", min_value=1, max_value=8, value=4)
+            new_top_k = st.slider(
+                "RAG Top-K",
+                min_value=1,
+                max_value=8,
+                value=4,
+                key=f"new_agent_top_k_{create_form_version}",
+            )
 
         new_files = st.file_uploader(
             "RAG 참조 파일 Drag & Drop",
             type=SUPPORTED_TYPES,
             accept_multiple_files=True,
+            key=f"new_agent_files_{create_form_version}",
         )
 
-        create_agent = st.form_submit_button("에이전트 생성", use_container_width=True)
+        st.caption("Enter / Ctrl+Enter로는 생성되지 않습니다. 아래 버튼을 클릭해야만 에이전트가 생성됩니다.")
+        create_agent = st.form_submit_button(
+            "에이전트 생성",
+            type="primary",
+            use_container_width=True,
+        )
 
     if create_agent:
+        validation_errors = []
         if not new_name.strip():
-            st.error("에이전트 이름을 입력하세요.")
-        elif not new_model.strip():
-            st.error("Model ID를 입력하세요.")
-        elif not new_system.strip():
-            st.error("System Prompt를 입력하세요.")
+            validation_errors.append("에이전트 이름을 입력하세요.")
+        if not new_model.strip():
+            validation_errors.append("Model ID를 입력하세요.")
+        if not new_system.strip():
+            validation_errors.append("System Prompt를 입력하세요.")
+
+        if validation_errors:
+            st.error(
+                "에이전트를 생성할 수 없습니다. 아래 항목을 확인해 주세요.\n\n"
+                + "\n".join(f"- {message}" for message in validation_errors)
+            )
+            st.info("작성한 내용은 그대로 유지됩니다. 수정한 뒤 **에이전트 생성** 버튼을 다시 클릭하세요.")
         else:
             agent_id = str(uuid.uuid4())
             st.session_state.agents[agent_id] = {
@@ -509,6 +545,9 @@ with tabs[0]:
                 "rag_files": uploaded_to_items(new_files),
             }
             st.success(f"'{new_name.strip()}' 에이전트를 만들었습니다.")
+            # Validation error: keep the same version so all entered values remain.
+            # Success: advance the version so only a successfully-created form resets.
+            st.session_state.create_agent_form_version += 1
             st.rerun()
 
     st.divider()
@@ -693,16 +732,50 @@ with tabs[2]:
         placeholder="완성된 Linear Workflow의 첫 번째 에이전트에게 전달할 실제 업무 요청을 입력하세요.",
     )
 
-    run_disabled = (not api_key) or (not st.session_state.workflow) or (not user_prompt.strip())
+    # 실행 버튼이 비활성화되는 이유를 사용자에게 명확히 보여준다.
+    readiness = {
+        "API Key": bool(api_key),
+        "Linear Workflow": bool(st.session_state.workflow),
+        "User Prompt": bool(user_prompt.strip()),
+    }
+    missing_requirements = [name for name, ready in readiness.items() if not ready]
+    run_disabled = bool(missing_requirements)
+
+    st.markdown("#### 실행 준비 상태")
+    status_cols = st.columns(3)
+    for col, (name, ready) in zip(status_cols, readiness.items()):
+        with col:
+            if ready:
+                st.success(f"✓ {name}")
+            else:
+                st.error(f"✕ {name}")
+
+    if missing_requirements:
+        guidance = {
+            "API Key": "왼쪽 사이드바의 **OpenAI API Key**를 입력하세요.",
+            "Linear Workflow": "2번 탭에서 에이전트를 하나 이상 Workflow Step으로 추가하세요.",
+            "User Prompt": "위의 **User Prompt** 입력창에 실행할 요청을 입력하세요.",
+        }
+        st.warning(
+            "**아직 실행할 수 없습니다.** 다음 항목을 확인해 주세요:\n\n"
+            + "\n".join(f"- {guidance[item]}" for item in missing_requirements)
+        )
+        button_label = "▶ Linear Workflow 실행 · 준비 필요"
+    else:
+        st.success("모든 실행 조건이 충족되었습니다. 아래 버튼을 눌러 Workflow를 실행하세요.")
+        button_label = "▶ Linear Workflow 실행"
+
     run_clicked = st.button(
-        "▶ Linear Workflow 실행",
+        button_label,
         type="primary",
         use_container_width=True,
         disabled=run_disabled,
+        help=(
+            "비활성화 이유: " + ", ".join(missing_requirements)
+            if missing_requirements
+            else "Workflow를 실행합니다."
+        ),
     )
-
-    if not api_key:
-        st.caption("실행하려면 왼쪽 사이드바에 OpenAI API Key를 입력하세요.")
 
     if run_clicked:
         client = OpenAI(api_key=api_key)
