@@ -64,6 +64,36 @@ st.markdown(
             opacity:.55;
             margin:-2px 0 4px 0;
         }
+        .workflow-kicker {
+            font-size: .76rem;
+            letter-spacing: .09em;
+            text-transform: uppercase;
+            opacity: .58;
+            margin-bottom: .1rem;
+        }
+        .flow-connector {
+            text-align: center;
+            opacity: .62;
+            line-height: 1.15;
+            margin: .35rem 0 .55rem 0;
+        }
+        .flow-connector .arrow {
+            display: block;
+            font-size: 1.45rem;
+            margin: .05rem 0;
+        }
+        .flow-connector .label {
+            display: inline-block;
+            font-size: .78rem;
+            letter-spacing: .04em;
+            opacity: .82;
+        }
+        .workflow-help {
+            text-align: center;
+            opacity: .7;
+            font-size: .86rem;
+            margin: -.1rem 0 .65rem 0;
+        }
         .agent-library-kicker {
             font-size: .78rem;
             letter-spacing: .08em;
@@ -1718,135 +1748,328 @@ with tabs[0]:
                     st.rerun()
 
 with tabs[1]:
-    st.subheader("Workflow Builder")
+    st.subheader("Workflow")
+    st.caption("Agent들이 어떤 방식으로 함께 일할지 구성하세요. 설정 목록보다 실제 작업 흐름을 먼저 보여줍니다.")
 
     selected_mode = st.radio(
-        "Workflow 구조",
+        "작업 방식",
         options=["Linear", "Hierarchical"],
         index=0 if st.session_state.workflow_mode == "Linear" else 1,
         horizontal=True,
-        help="Linear는 앞 단계 Output을 다음 단계 Input으로 전달합니다. Hierarchical은 Manager가 작업을 분배하고 Worker 결과를 다시 종합합니다.",
+        format_func=lambda mode: "→ 순차 실행 (Linear)" if mode == "Linear" else "👑 Manager 중심 (Hierarchical)",
+        help="순차 실행은 앞 단계 Output을 다음 단계 Input으로 전달합니다. Manager 중심은 Manager가 작업을 분배하고 Worker 결과를 다시 종합합니다.",
         key="workflow_mode_selector",
     )
     st.session_state.workflow_mode = selected_mode
+    st.divider()
 
     if selected_mode == "Linear":
-        st.markdown("### Linear Workflow 편집")
+        st.markdown("### → 순차 실행 Workflow")
+        st.caption("각 Agent의 결과가 다음 Agent의 입력으로 이어집니다. 위에서 아래로 실행 순서를 확인할 수 있습니다.")
+
         if not st.session_state.agents:
-            st.info("먼저 1번 탭에서 에이전트를 생성하세요.")
+            st.info("먼저 1번 탭에서 Agent를 생성하세요.")
         else:
             option_ids = list(st.session_state.agents.keys())
-            selected_agent = st.selectbox(
-                "Workflow에 추가할 에이전트",
-                options=option_ids,
-                format_func=lambda aid: f"{st.session_state.agents[aid]['name']} · {st.session_state.agents[aid]['model']}",
-                key="linear_add_agent",
-            )
-            if st.button("선택한 에이전트를 Step으로 추가", use_container_width=True, key="linear_add_button"):
-                st.session_state.workflow.append(
-                    {
-                        "step_id": str(uuid.uuid4()),
-                        "agent_id": selected_agent,
-                        "additional_prompt": "",
-                    }
-                )
-                st.rerun()
 
-        if st.session_state.workflow:
-            names = workflow_names()
-            st.markdown("**현재 Flow**")
-            st.info("  →  ".join(f"{i+1}. {name}" for i, name in enumerate(names)))
-
-            top_c1, top_c2 = st.columns([1, 1])
-            with top_c1:
-                st.session_state.include_original_prompt = st.checkbox(
-                    "후속 단계에도 최초 User Prompt 함께 전달",
-                    value=st.session_state.include_original_prompt,
-                    help="켜면 Step 2부터 '최초 User Prompt + 직전 Output'을 함께 전달합니다. 꺼도 직전 Output은 항상 전달됩니다.",
-                    key="linear_include_original",
+            with st.expander("＋ Step 추가", expanded=not bool(st.session_state.workflow)):
+                selected_agent = st.selectbox(
+                    "추가할 Agent",
+                    options=option_ids,
+                    format_func=lambda aid: f"{st.session_state.agents[aid]['name']} · {st.session_state.agents[aid]['model']}",
+                    key="linear_add_agent",
                 )
-            with top_c2:
-                if st.button("Linear Workflow 전체 비우기", use_container_width=True, key="linear_clear"):
-                    st.session_state.workflow = []
+                if st.button(
+                    "선택한 Agent를 Step으로 추가",
+                    use_container_width=True,
+                    type="primary",
+                    key="linear_add_button",
+                ):
+                    st.session_state.workflow.append(
+                        {
+                            "step_id": str(uuid.uuid4()),
+                            "agent_id": selected_agent,
+                            "additional_prompt": "",
+                        }
+                    )
                     st.rerun()
 
-            st.divider()
+        if st.session_state.workflow:
+            st.markdown(
+                '<div class="workflow-help">위에서 아래로 실행되며 각 Step의 Output이 다음 Step의 Input으로 전달됩니다.</div>',
+                unsafe_allow_html=True,
+            )
 
             for idx, step in enumerate(list(st.session_state.workflow)):
                 agent = st.session_state.agents.get(step["agent_id"])
                 if not agent:
                     continue
 
-                with st.container(border=True):
-                    header_left, up_col, down_col, del_col = st.columns([7, 1, 1, 1])
-                    with header_left:
-                        st.markdown(
-                            f"### Step {idx + 1}. {agent['name']}\n"
-                            f"`{agent['model']}` · "
-                            + (f"RAG ON ({len(agent.get('rag_files', []))} files)" if agent.get("rag_enabled") else "RAG OFF")
+                _, card_col, _ = st.columns([1.05, 3.8, 1.05])
+                with card_col:
+                    with st.container(border=True):
+                        st.markdown('<div class="workflow-kicker">STEP {}</div>'.format(idx + 1), unsafe_allow_html=True)
+                        st.markdown(f"#### {agent['name']}")
+                        rag_label = (
+                            f"📎 참고자료 {len(agent.get('rag_files', []))}개"
+                            if agent.get("rag_enabled") and agent.get("rag_files")
+                            else "📎 참고자료 없음" if not agent.get("rag_files") else "📎 참고자료 사용 안 함"
                         )
-                    with up_col:
-                        if st.button("↑", key=f"linear_up_{step['step_id']}", disabled=(idx == 0), use_container_width=True):
-                            st.session_state.workflow[idx - 1], st.session_state.workflow[idx] = (
-                                st.session_state.workflow[idx], st.session_state.workflow[idx - 1]
-                            )
-                            st.rerun()
-                    with down_col:
-                        if st.button("↓", key=f"linear_down_{step['step_id']}", disabled=(idx == len(st.session_state.workflow) - 1), use_container_width=True):
-                            st.session_state.workflow[idx + 1], st.session_state.workflow[idx] = (
-                                st.session_state.workflow[idx], st.session_state.workflow[idx + 1]
-                            )
-                            st.rerun()
-                    with del_col:
-                        if st.button("✕", key=f"linear_remove_{step['step_id']}", use_container_width=True):
-                            st.session_state.workflow.pop(idx)
-                            st.rerun()
+                        st.caption(f"{agent['model']} · {rag_label}")
 
-                    extra = st.text_area(
-                        "이 Step의 추가 프롬프트",
-                        value=step.get("additional_prompt", ""),
-                        key=f"linear_extra_{step['step_id']}",
-                        placeholder="예: 앞 단계 결과에서 핵심 원인 3개만 추려 표로 정리해라.",
-                        height=110,
-                    )
-                    step["additional_prompt"] = extra
+                        up_col, down_col, delete_col = st.columns(3)
+                        with up_col:
+                            if st.button(
+                                "↑ 위로",
+                                key=f"linear_up_{step['step_id']}",
+                                disabled=(idx == 0),
+                                use_container_width=True,
+                            ):
+                                st.session_state.workflow[idx - 1], st.session_state.workflow[idx] = (
+                                    st.session_state.workflow[idx],
+                                    st.session_state.workflow[idx - 1],
+                                )
+                                st.rerun()
+                        with down_col:
+                            if st.button(
+                                "↓ 아래로",
+                                key=f"linear_down_{step['step_id']}",
+                                disabled=(idx == len(st.session_state.workflow) - 1),
+                                use_container_width=True,
+                            ):
+                                st.session_state.workflow[idx + 1], st.session_state.workflow[idx] = (
+                                    st.session_state.workflow[idx],
+                                    st.session_state.workflow[idx + 1],
+                                )
+                                st.rerun()
+                        with delete_col:
+                            if st.button(
+                                "× 제거",
+                                key=f"linear_remove_{step['step_id']}",
+                                use_container_width=True,
+                            ):
+                                st.session_state.workflow.pop(idx)
+                                st.rerun()
+
+                        with st.expander("⚙ Step 설정", expanded=False):
+                            step["additional_prompt"] = st.text_area(
+                                "이 단계에서 추가할 지시",
+                                value=step.get("additional_prompt", ""),
+                                key=f"linear_extra_{step['step_id']}",
+                                placeholder="예: 앞 단계 결과에서 핵심 원인 3개만 추려 표로 정리해라.",
+                                height=120,
+                                help="Agent의 System Prompt는 그대로 두고, 이 Workflow Step에서만 적용할 추가 지시입니다.",
+                            )
 
                 if idx < len(st.session_state.workflow) - 1:
-                    st.markdown('<div class="flow-arrow">↓ &nbsp; Output → Input</div>', unsafe_allow_html=True)
+                    st.markdown(
+                        '''
+                        <div class="flow-connector">
+                            <span class="arrow">↓</span>
+                            <span class="label">OUTPUT → INPUT</span>
+                            <span class="arrow">↓</span>
+                        </div>
+                        ''',
+                        unsafe_allow_html=True,
+                    )
+
+            with st.expander("⚙ Workflow 옵션", expanded=False):
+                st.session_state.include_original_prompt = st.checkbox(
+                    "후속 단계에도 최초 User Prompt 함께 전달",
+                    value=st.session_state.include_original_prompt,
+                    help="켜면 Step 2부터 '최초 User Prompt + 직전 Output'을 함께 전달합니다. 꺼도 직전 Output은 항상 전달됩니다.",
+                    key="linear_include_original",
+                )
+                st.caption("Workflow 구성을 초기화하려면 아래 버튼을 사용하세요.")
+                if st.button(
+                    "Linear Workflow 전체 비우기",
+                    use_container_width=True,
+                    key="linear_clear",
+                ):
+                    st.session_state.workflow = []
+                    st.rerun()
         else:
-            st.info("Linear Workflow가 비어 있습니다. 에이전트를 Step으로 추가하세요.")
+            st.info("Linear Workflow가 비어 있습니다. 위의 **＋ Step 추가**에서 Agent를 추가하세요.")
 
     else:
-        st.markdown("### Hierarchical Workflow 편집")
-        st.caption(
-            "Manager가 먼저 전체 요청을 분석해 Worker별 작업 계획을 만들고, "
-            "Worker들이 각자 수행한 결과를 Manager가 다시 종합해 최종 답변을 만듭니다."
-        )
+        st.markdown("### 👑 Manager 중심 Workflow")
+        st.caption("Manager가 요청을 분석해 전문 Agent에게 업무를 나누고, 결과를 다시 검토해 최종 답변을 만듭니다.")
+
+        workers = st.session_state.hierarchy.setdefault("workers", [])
+        manager_id = st.session_state.hierarchy.get("manager_agent_id")
 
         if not st.session_state.agents:
-            st.info("먼저 1번 탭에서 에이전트를 생성하세요.")
+            st.info("먼저 1번 탭에서 Agent를 생성하세요.")
         else:
             agent_ids = list(st.session_state.agents.keys())
             manager_options = [None] + agent_ids
-            current_manager = st.session_state.hierarchy.get("manager_agent_id")
-            if current_manager not in manager_options:
-                current_manager = None
+            if manager_id not in manager_options:
+                manager_id = None
 
             manager_id = st.selectbox(
-                "Manager / Supervisor 에이전트",
+                "Manager",
                 options=manager_options,
-                index=manager_options.index(current_manager),
-                format_func=lambda aid: "선택하세요" if aid is None else f"{st.session_state.agents[aid]['name']} · {st.session_state.agents[aid]['model']}",
+                index=manager_options.index(manager_id),
+                format_func=lambda aid: "Manager를 선택하세요" if aid is None else f"{st.session_state.agents[aid]['name']} · {st.session_state.agents[aid]['model']}",
                 key="hier_manager_select",
+                help="전체 요청을 분석하고 Worker에게 작업을 배분한 뒤 최종 결과를 검토할 Agent입니다.",
             )
             st.session_state.hierarchy["manager_agent_id"] = manager_id
 
-            if manager_id:
-                manager = st.session_state.agents[manager_id]
-                st.info(
-                    f"Manager: {manager['name']} · {manager['model']} · "
-                    + (f"RAG ON ({len(manager.get('rag_files', []))} files)" if manager.get("rag_enabled") else "RAG OFF")
+            _, manager_col, _ = st.columns([1.2, 2.6, 1.2])
+            with manager_col:
+                with st.container(border=True):
+                    st.markdown('<div class="workflow-kicker">👑 MANAGER</div>', unsafe_allow_html=True)
+                    if manager_id in st.session_state.agents:
+                        manager = st.session_state.agents[manager_id]
+                        st.markdown(f"#### {manager['name']}")
+                        manager_rag_label = (
+                            f"📎 참고자료 {len(manager.get('rag_files', []))}개"
+                            if manager.get("rag_enabled") and manager.get("rag_files")
+                            else "📎 참고자료 없음" if not manager.get("rag_files") else "📎 참고자료 사용 안 함"
+                        )
+                        st.caption(f"{manager['model']} · {manager_rag_label}")
+                        st.caption("사용자 요청 분석 · Worker 업무 분배")
+                    else:
+                        st.markdown("#### Manager 미선택")
+                        st.caption("위 선택창에서 Manager를 지정하세요.")
+
+            st.markdown(
+                '''
+                <div class="flow-connector">
+                    <span class="arrow">↓</span>
+                    <span class="label">작업 분배</span>
+                    <span class="arrow">↓</span>
+                </div>
+                ''',
+                unsafe_allow_html=True,
+            )
+
+            if workers:
+                for row_start in range(0, len(workers), 3):
+                    worker_cols = st.columns(3)
+                    row_workers = workers[row_start:row_start + 3]
+                    for offset, worker in enumerate(row_workers):
+                        idx = row_start + offset
+                        agent = st.session_state.agents.get(worker["agent_id"])
+                        if not agent:
+                            continue
+
+                        with worker_cols[offset]:
+                            with st.container(border=True):
+                                st.markdown(
+                                    '<div class="workflow-kicker">WORKER {}</div>'.format(idx + 1),
+                                    unsafe_allow_html=True,
+                                )
+                                st.markdown(f"#### {agent['name']}")
+                                rag_label = (
+                                    f"📎 참고자료 {len(agent.get('rag_files', []))}개"
+                                    if agent.get("rag_enabled") and agent.get("rag_files")
+                                    else "📎 참고자료 없음" if not agent.get("rag_files") else "📎 참고자료 사용 안 함"
+                                )
+                                st.caption(f"{agent['model']} · {rag_label}")
+
+                                up_col, down_col, delete_col = st.columns(3)
+                                with up_col:
+                                    if st.button(
+                                        "↑",
+                                        key=f"hier_up_{worker['worker_id']}",
+                                        disabled=(idx == 0),
+                                        use_container_width=True,
+                                        help="Worker 순서를 위로 이동",
+                                    ):
+                                        workers[idx - 1], workers[idx] = workers[idx], workers[idx - 1]
+                                        st.rerun()
+                                with down_col:
+                                    if st.button(
+                                        "↓",
+                                        key=f"hier_down_{worker['worker_id']}",
+                                        disabled=(idx == len(workers) - 1),
+                                        use_container_width=True,
+                                        help="Worker 순서를 아래로 이동",
+                                    ):
+                                        workers[idx + 1], workers[idx] = workers[idx], workers[idx + 1]
+                                        st.rerun()
+                                with delete_col:
+                                    if st.button(
+                                        "×",
+                                        key=f"hier_remove_{worker['worker_id']}",
+                                        use_container_width=True,
+                                        help="이 Worker를 Workflow에서 제거",
+                                    ):
+                                        workers.pop(idx)
+                                        st.rerun()
+
+                                with st.expander("⚙ Worker 설정", expanded=False):
+                                    worker["additional_prompt"] = st.text_area(
+                                        "이 Workflow에서 맡길 추가 역할 / 지시",
+                                        value=worker.get("additional_prompt", ""),
+                                        key=f"hier_extra_{worker['worker_id']}",
+                                        placeholder="예: 방법론과 논리적 허점을 중심으로 검토하고 핵심 위험만 정리해라.",
+                                        height=120,
+                                        help="Agent의 System Prompt는 그대로 두고, 이 Hierarchical Workflow에서만 적용할 추가 역할입니다.",
+                                    )
+            else:
+                st.info("아직 Worker가 없습니다. 아래에서 전문 Agent를 Worker로 추가하세요.")
+
+            with st.expander("＋ Worker 추가", expanded=not bool(workers)):
+                add_worker_agent = st.selectbox(
+                    "Worker로 추가할 Agent",
+                    options=agent_ids,
+                    format_func=lambda aid: f"{st.session_state.agents[aid]['name']} · {st.session_state.agents[aid]['model']}",
+                    key="hier_add_worker_agent",
                 )
+                if st.button(
+                    "선택한 Agent를 Worker로 추가",
+                    use_container_width=True,
+                    type="primary",
+                    key="hier_add_worker_button",
+                ):
+                    st.session_state.hierarchy.setdefault("workers", []).append(
+                        {
+                            "worker_id": str(uuid.uuid4()),
+                            "agent_id": add_worker_agent,
+                            "additional_prompt": "",
+                        }
+                    )
+                    st.rerun()
+
+            st.markdown(
+                '''
+                <div class="flow-connector">
+                    <span class="arrow">↓</span>
+                    <span class="label">결과 통합</span>
+                    <span class="arrow">↓</span>
+                </div>
+                ''',
+                unsafe_allow_html=True,
+            )
+
+            _, final_manager_col, _ = st.columns([1.2, 2.6, 1.2])
+            with final_manager_col:
+                with st.container(border=True):
+                    st.markdown('<div class="workflow-kicker">👑 MANAGER · FINAL REVIEW</div>', unsafe_allow_html=True)
+                    if manager_id in st.session_state.agents:
+                        manager = st.session_state.agents[manager_id]
+                        st.markdown(f"#### {manager['name']}")
+                        st.caption("Worker 결과 검증 · 충돌 조정 · 최종 답변 생성")
+                    else:
+                        st.markdown("#### Manager 미선택")
+                        st.caption("Manager를 지정하면 최종 검토 단계에도 동일한 Agent가 사용됩니다.")
+
+            with st.expander("⚙ Workflow 옵션", expanded=False):
+                st.caption("Worker 구성 전체를 초기화할 수 있습니다. Manager 선택과 Manager Prompt는 유지됩니다.")
+                if st.button(
+                    "Hierarchical Worker 전체 비우기",
+                    use_container_width=True,
+                    key="hier_clear_workers",
+                ):
+                    st.session_state.hierarchy["workers"] = []
+                    st.rerun()
+
+            st.divider()
+            st.markdown("#### Manager 세부 설정")
+            st.caption("Manager의 동작 규칙입니다. STEP 4에서 고급 설정으로 정리할 예정이며, 현재 값과 동작은 그대로 유지됩니다.")
 
             st.session_state.hierarchy["manager_planning_prompt"] = st.text_area(
                 "Manager 작업 분배 프롬프트",
@@ -1867,77 +2090,6 @@ with tabs[1]:
                 key="hier_manager_routing_prompt",
                 help="최초 실행 후 사용자 피드백이 들어오면 Manager가 어떤 Worker에게 재작업을 맡길지 판단할 때 사용합니다.",
             )
-
-            st.divider()
-            add_worker_agent = st.selectbox(
-                "Worker로 추가할 에이전트",
-                options=agent_ids,
-                format_func=lambda aid: f"{st.session_state.agents[aid]['name']} · {st.session_state.agents[aid]['model']}",
-                key="hier_add_worker_agent",
-            )
-            if st.button("선택한 에이전트를 Worker로 추가", use_container_width=True, key="hier_add_worker_button"):
-                st.session_state.hierarchy.setdefault("workers", []).append(
-                    {
-                        "worker_id": str(uuid.uuid4()),
-                        "agent_id": add_worker_agent,
-                        "additional_prompt": "",
-                    }
-                )
-                st.rerun()
-
-        workers = st.session_state.hierarchy.get("workers", [])
-        if workers:
-            manager_name = "Manager 미선택"
-            manager_id = st.session_state.hierarchy.get("manager_agent_id")
-            if manager_id in st.session_state.agents:
-                manager_name = st.session_state.agents[manager_id]["name"]
-            worker_names = hierarchy_worker_names()
-            st.markdown("**현재 Hierarchy**")
-            st.info(
-                f"Manager · {manager_name}  →  "
-                + " | ".join(f"Worker {i+1} · {name}" for i, name in enumerate(worker_names))
-                + f"  →  Manager · {manager_name} 최종 종합"
-            )
-
-            if st.button("Hierarchical Worker 전체 비우기", use_container_width=True, key="hier_clear_workers"):
-                st.session_state.hierarchy["workers"] = []
-                st.rerun()
-
-            st.divider()
-            for idx, worker in enumerate(list(workers)):
-                agent = st.session_state.agents.get(worker["agent_id"])
-                if not agent:
-                    continue
-                with st.container(border=True):
-                    header_left, up_col, down_col, del_col = st.columns([7, 1, 1, 1])
-                    with header_left:
-                        st.markdown(
-                            f"### Worker {idx + 1}. {agent['name']}\n"
-                            f"`{agent['model']}` · "
-                            + (f"RAG ON ({len(agent.get('rag_files', []))} files)" if agent.get("rag_enabled") else "RAG OFF")
-                        )
-                    with up_col:
-                        if st.button("↑", key=f"hier_up_{worker['worker_id']}", disabled=(idx == 0), use_container_width=True):
-                            workers[idx - 1], workers[idx] = workers[idx], workers[idx - 1]
-                            st.rerun()
-                    with down_col:
-                        if st.button("↓", key=f"hier_down_{worker['worker_id']}", disabled=(idx == len(workers) - 1), use_container_width=True):
-                            workers[idx + 1], workers[idx] = workers[idx], workers[idx + 1]
-                            st.rerun()
-                    with del_col:
-                        if st.button("✕", key=f"hier_remove_{worker['worker_id']}", use_container_width=True):
-                            workers.pop(idx)
-                            st.rerun()
-
-                    worker["additional_prompt"] = st.text_area(
-                        "이 Worker의 추가 역할 / 지시",
-                        value=worker.get("additional_prompt", ""),
-                        key=f"hier_extra_{worker['worker_id']}",
-                        placeholder="예: 재무 관점만 검토하고 위험 요인을 수치 중심으로 정리해라.",
-                        height=110,
-                    )
-        else:
-            st.info("Worker가 없습니다. 에이전트를 하나 이상 Worker로 추가하세요.")
 
 
 with tabs[2]:
