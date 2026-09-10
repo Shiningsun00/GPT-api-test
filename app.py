@@ -2,6 +2,7 @@ import csv
 import hashlib
 import io
 import json
+import re
 import uuid
 import zipfile
 from pathlib import Path
@@ -23,7 +24,7 @@ MAX_CHUNKS_PER_AGENT = 300
 CHUNK_SIZE = 2800
 CHUNK_OVERLAP = 350
 
-WORKSPACE_SCHEMA_VERSION = 2
+WORKSPACE_SCHEMA_VERSION = 3
 AUTO_WORKSPACE_FILENAME = "agent_workspace.zip"
 
 # 실행 시 임시 업로드 파일이 지나치게 큰 경우 API 입력 폭증을 막기 위한 보호 한도
@@ -32,6 +33,12 @@ MAX_EXECUTION_CONTEXT_CHARS_PER_STEP = 250_000
 
 DEFAULT_MANAGER_PLANNING_PROMPT = """You are the manager of a hierarchical agent team. Analyze the user's goal and create a clear delegation plan for the listed workers. Assign distinct responsibilities based on each worker's role and configured instruction. Avoid doing all worker tasks yourself. Produce a concise plan that workers can execute directly."""
 DEFAULT_MANAGER_SYNTHESIS_PROMPT = """You are the manager of a hierarchical agent team. Review the original user request, your delegation plan, and all worker outputs. Resolve conflicts, remove duplication, preserve useful evidence, and produce one complete final answer that directly satisfies the user."""
+DEFAULT_MANAGER_ROUTING_PROMPT = """You are the manager of an ongoing human-in-the-loop hierarchical workflow. The user is giving feedback on a previous final report. Decide whether the request should be handled by the manager alone or delegated to one or more workers. Select only workers whose expertise is actually needed. Return ONLY one JSON object with this exact shape: {"action":"delegate|manager_only","reason":"short reason","manager_message":"short message to the user","assignments":[{"worker_key":"worker_1","task":"specific task for that worker"}]}. Do not wrap the JSON in markdown. If no worker is needed, use action=manager_only and assignments=[]."""
+DEFAULT_MANAGER_REVISION_PROMPT = """Update the previous final report using the user's latest feedback and the newest worker results. Treat prior validated content as persistent memory: preserve it unless the new evidence or user request requires a change. Do not simply concatenate outputs. Re-evaluate conflicts, decide what is valid, and return one complete revised final report to the user. The manager owns the final judgment."""
+
+MAX_MANAGER_MEMORY_CHARS = 90_000
+MAX_MEMORY_OUTPUT_CHARS = 22_000
+MAX_CHAT_MEMORY_CHARS = 30_000
 
 
 st.set_page_config(
@@ -70,6 +77,8 @@ def init_state():
         "workflow": [],
         "rag_cache": {},
         "last_run": None,
+        "hierarchical_session": None,
+        "hier_feedback_form_version": 0,
         "include_original_prompt": True,
         "create_agent_form_version": 0,
         "workspace_import_version": 0,
@@ -82,6 +91,7 @@ def init_state():
             "manager_agent_id": None,
             "manager_planning_prompt": DEFAULT_MANAGER_PLANNING_PROMPT,
             "manager_synthesis_prompt": DEFAULT_MANAGER_SYNTHESIS_PROMPT,
+            "manager_routing_prompt": DEFAULT_MANAGER_ROUTING_PROMPT,
             "workers": [],
         },
     }
@@ -99,7 +109,7 @@ def _safe_archive_name(name: str) -> str:
 
 def build_workspace_bundle() -> bytes:
     """
-    Export all agents + RAG source files + Linear Workflow into one ZIP.
+    Export all agents + RAG source files + Linear/Hierarchical Workflow into one ZIP.
     OpenAI API keys and previous run results are intentionally excluded.
     """
     buffer = io.BytesIO()
@@ -165,7 +175,7 @@ def restore_workspace_bundle(bundle_bytes: bytes) -> dict:
             raise ValueError("유효한 저장 파일이 아닙니다. manifest.json이 없습니다.") from exc
 
         version = int(manifest.get("schema_version", 0))
-        if version not in {1, WORKSPACE_SCHEMA_VERSION}:
+        if version not in {1, 2, WORKSPACE_SCHEMA_VERSION}:
             raise ValueError(
                 f"지원하지 않는 저장 파일 버전입니다. "
                 f"파일 버전={version}, 앱 버전={WORKSPACE_SCHEMA_VERSION}"
@@ -260,10 +270,14 @@ def restore_workspace_bundle(bundle_bytes: bytes) -> dict:
         "manager_synthesis_prompt": saved_hierarchy.get(
             "manager_synthesis_prompt", DEFAULT_MANAGER_SYNTHESIS_PROMPT
         ),
+        "manager_routing_prompt": saved_hierarchy.get(
+            "manager_routing_prompt", DEFAULT_MANAGER_ROUTING_PROMPT
+        ),
         "workers": restored_workers,
     }
     st.session_state.rag_cache = {}
     st.session_state.last_run = None
+    st.session_state.hierarchical_session = None
 
     total_rag_files = sum(
         len(agent.get("rag_files", [])) for agent in restored_agents.values()
@@ -628,13 +642,194 @@ def hierarchy_ready() -> bool:
     return bool(manager_id in st.session_state.agents and workers)
 
 
+def clip_memory(text: str, limit: int = MAX_MEMORY_OUTPUT_CHARS) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    head = max(int(limit * 0.72), 1)
+    tail = max(limit - head, 1)
+    return (
+        text[:head]
+        + f"\n\n[... memory clipped: {len(text) - limit:,} characters omitted ...]\n\n"
+        + text[-tail:]
+    )
+
+
+def extract_json_object(text: str) -> dict:
+    """Parse a manager routing JSON response even when it is wrapped in prose/fences."""
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("Manager routing response is empty.")
+
+    candidates = [raw]
+    fenced = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE | re.DOTALL).strip()
+    if fenced != raw:
+        candidates.append(fenced)
+
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(raw[start : end + 1])
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+
+    raise ValueError("Manager routing JSON을 해석하지 못했습니다.")
+
+
+def session_worker_registry(session: dict) -> list[dict]:
+    registry = []
+    for idx, saved_worker in enumerate(session.get("workers", []), start=1):
+        agent = st.session_state.agents.get(saved_worker.get("agent_id"))
+        if not agent:
+            continue
+        registry.append(
+            {
+                "worker_key": f"worker_{idx}",
+                "worker_id": saved_worker["worker_id"],
+                "agent_id": saved_worker["agent_id"],
+                "name": agent.get("name", f"Worker {idx}"),
+                "model": agent.get("model", DEFAULT_MODEL),
+                "system_prompt": agent.get("system_prompt", ""),
+                "additional_prompt": saved_worker.get("additional_prompt", ""),
+                "position": idx,
+            }
+        )
+    return registry
+
+
+def worker_roster_for_manager(registry: list[dict]) -> str:
+    blocks = []
+    for item in registry:
+        role = clip_memory(item.get("system_prompt", ""), 2400)
+        extra = clip_memory(item.get("additional_prompt", ""), 1200) or "No extra worker instruction."
+        blocks.append(
+            f"{item['worker_key']} | Worker {item['position']} | {item['name']} | {item['model']}\n"
+            f"Agent role/system instruction:\n{role}\n"
+            f"Workflow-specific instruction:\n{extra}"
+        )
+    return "\n\n---\n\n".join(blocks)
+
+
+def compact_chat_history(history: list[dict]) -> str:
+    if not history:
+        return "No follow-up conversation yet."
+    parts = []
+    for message in history[-12:]:
+        role = "User" if message.get("role") == "user" else "Manager"
+        parts.append(f"### {role}\n{clip_memory(message.get('content', ''), 6000)}")
+    combined = "\n\n".join(parts)
+    return clip_memory(combined, MAX_CHAT_MEMORY_CHARS)
+
+
+def normalize_routing_decision(raw_decision: dict, registry: list[dict], fallback_feedback: str) -> dict:
+    valid = {item["worker_key"]: item for item in registry}
+    action = str(raw_decision.get("action", "")).strip().lower()
+    reason = str(raw_decision.get("reason", "")).strip()
+    manager_message = str(raw_decision.get("manager_message", "")).strip()
+
+    assignments = []
+    seen = set()
+    for assignment in raw_decision.get("assignments", []) or []:
+        if not isinstance(assignment, dict):
+            continue
+        key = str(assignment.get("worker_key", "")).strip()
+        if key not in valid or key in seen:
+            continue
+        task = str(assignment.get("task", "")).strip() or fallback_feedback.strip()
+        assignments.append({"worker_key": key, "task": task})
+        seen.add(key)
+
+    if action == "manager_only":
+        assignments = []
+    elif assignments:
+        action = "delegate"
+    else:
+        # If the manager failed to provide usable routing, re-run all available workers rather than dropping the request.
+        action = "delegate" if registry else "manager_only"
+        assignments = [
+            {"worker_key": item["worker_key"], "task": fallback_feedback.strip()}
+            for item in registry
+        ]
+        if not reason:
+            reason = "라우팅 결과가 불완전하여 안전하게 사용 가능한 Worker 전체에 재검토를 요청했습니다."
+
+    if not manager_message:
+        if action == "delegate":
+            names = [valid[a["worker_key"]]["name"] for a in assignments]
+            manager_message = "피드백을 반영하기 위해 " + ", ".join(names) + "에게 필요한 부분만 재검토시키겠습니다."
+        else:
+            manager_message = "이 요청은 추가 Worker 실행 없이 기존 결과와 대화 맥락을 바탕으로 제가 직접 재판단하겠습니다."
+
+    return {
+        "action": action,
+        "reason": reason or "사용자 피드백의 성격과 Worker 역할을 기준으로 판단했습니다.",
+        "manager_message": manager_message,
+        "assignments": assignments,
+    }
+
+
+def execute_agent_stage(
+    client: OpenAI,
+    agent: dict,
+    primary_input: str,
+    additional_prompt: str,
+    target_id: str,
+    stage_label: str,
+    execution_context_by_target: dict | None = None,
+    execution_filenames_by_target: dict | None = None,
+):
+    execution_context_by_target = execution_context_by_target or {}
+    execution_filenames_by_target = execution_filenames_by_target or {}
+
+    rag_context = ""
+    rag_sources = []
+    rag_truncated = False
+    if agent.get("rag_enabled") and agent.get("rag_files"):
+        retrieval_query = primary_input
+        if additional_prompt:
+            retrieval_query += f"\n\nAdditional instruction:\n{additional_prompt}"
+        rag_context, rag_sources, rag_truncated = retrieve_rag(client, agent, retrieval_query)
+
+    execution_file_context = "\n\n---\n\n".join(execution_context_by_target.get(target_id, []))
+    output, usage = call_agent(
+        client=client,
+        agent=agent,
+        primary_input=primary_input,
+        additional_prompt=additional_prompt,
+        rag_context=rag_context,
+        execution_file_context=execution_file_context,
+    )
+    result = {
+        "target_id": target_id,
+        "agent_id": agent.get("id"),
+        "stage_label": stage_label,
+        "agent_name": agent["name"],
+        "model": agent["model"],
+        "primary_input": primary_input,
+        "additional_prompt": additional_prompt,
+        "execution_files": execution_filenames_by_target.get(target_id, []),
+        "rag_sources": rag_sources,
+        "rag_truncated": rag_truncated,
+        "output": output,
+        "usage": usage,
+    }
+    return output, result
+
+
 def render_last_run(run_data: dict):
     if not run_data:
         return
 
     st.divider()
     mode = run_data.get("mode", "Linear")
-    st.subheader(f"실행 결과 · {mode}")
+    revision_suffix = f" · v{run_data.get('revision_count')}" if mode == "Hierarchical" and run_data.get("revision_count") else ""
+    st.subheader(f"실행 결과 · {mode}{revision_suffix}")
 
     if mode == "Hierarchical" and run_data.get("manager_plan"):
         with st.expander("Manager · Delegation Plan", expanded=False):
@@ -678,7 +873,8 @@ def render_last_run(run_data: dict):
             st.write(result["output"])
 
     st.success("Workflow complete")
-    st.markdown("### 최종 Output")
+    final_label = f"### 최종 Output{revision_suffix}" if revision_suffix else "### 최종 Output"
+    st.markdown(final_label)
     st.write(run_data["final_output"])
 
     exportable = {
@@ -688,11 +884,335 @@ def render_last_run(run_data: dict):
         "manager_plan": run_data.get("manager_plan"),
         "steps": run_data.get("steps", []),
         "final_output": run_data["final_output"],
+        "revision_count": run_data.get("revision_count"),
     }
     st.download_button(
         "실행 결과 JSON 다운로드",
         data=json.dumps(exportable, ensure_ascii=False, indent=2),
         file_name=f"{mode.lower()}_workflow_result.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+
+
+def render_hierarchical_feedback_panel(api_key: str):
+    session = st.session_state.get("hierarchical_session")
+    if not session:
+        return
+
+    manager = st.session_state.agents.get(session.get("manager_agent_id"))
+    registry = session_worker_registry(session)
+    current_revision = len(session.get("revisions", []))
+
+    st.divider()
+    st.subheader("💬 Manager와 계속 작업하기")
+    st.caption(
+        "이전 실행 결과, Worker별 최신 결과, 사용자 피드백, 최초 실행 파일의 추출 맥락을 세션 메모리에 유지합니다. "
+        "Manager가 새 요청을 판단해 필요한 Worker만 다시 실행한 뒤 최종안을 갱신합니다."
+    )
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("현재 Revision", f"v{current_revision}")
+    with c2:
+        st.metric("Manager", session.get("manager_name", "-") or "-")
+    with c3:
+        st.metric("사용 가능한 Worker", len(registry))
+
+    if manager is None:
+        st.error("이 세션에서 사용하던 Manager 에이전트가 삭제되었습니다. 새 Hierarchical Workflow를 실행해 세션을 다시 시작하세요.")
+        return
+
+    chat_history = session.setdefault("chat_history", [])
+    if chat_history:
+        st.markdown("#### 대화")
+        for message in chat_history:
+            role = message.get("role", "assistant")
+            with st.chat_message("user" if role == "user" else "assistant"):
+                if role == "assistant" and message.get("routing_summary"):
+                    st.caption(message["routing_summary"])
+                if role == "assistant" and message.get("manager_message"):
+                    st.caption("Manager 판단 · " + message["manager_message"])
+                st.write(message.get("content", ""))
+    else:
+        st.info("위 최종안을 보고 수정, 추가 검증, 재요약, 특정 관점 심층 분석 등을 Manager에게 요청할 수 있습니다.")
+
+    form_version = st.session_state.get("hier_feedback_form_version", 0)
+    with st.form(f"hier_manager_feedback_form_{form_version}", clear_on_submit=False, enter_to_submit=False):
+        feedback = st.text_area(
+            "Manager에게 메시지",
+            height=120,
+            placeholder=(
+                "예: 비판가가 방법론 검증을 약하게 한 것 같아. 표본 설계와 통계 분석만 더 엄격하게 검토해서 최종안을 수정해줘."
+            ),
+            key=f"hier_manager_feedback_text_{form_version}",
+        )
+        feedback_clicked = st.form_submit_button(
+            "↻ 피드백 반영 및 재실행",
+            type="primary",
+            use_container_width=True,
+            disabled=not bool(api_key),
+        )
+
+    if not api_key:
+        st.caption("Manager와 후속 작업을 계속하려면 왼쪽 사이드바에 OpenAI API Key가 필요합니다.")
+
+    if feedback_clicked and not feedback.strip():
+        st.warning("Manager에게 전달할 피드백을 입력하세요.")
+
+    if feedback_clicked and feedback.strip():
+        client = OpenAI(api_key=api_key)
+        feedback = feedback.strip()
+        previous_final = session.get("current_final_output", "")
+        execution_context_by_target = session.get("execution_context_by_target", {})
+        execution_filenames_by_target = session.get("execution_filenames_by_target", {})
+        routing_steps = []
+
+        chat_history.append({"role": "user", "content": feedback})
+
+        try:
+            roster = worker_roster_for_manager(registry) or "No available workers."
+            routing_input = (
+                f"## Original user request\n{clip_memory(session.get('original_user_prompt', ''), 18000)}\n\n"
+                f"## Current final report (Revision v{current_revision})\n{clip_memory(previous_final, 26000)}\n\n"
+                f"## Follow-up conversation memory\n{compact_chat_history(chat_history[:-1])}\n\n"
+                f"## Latest user feedback\n{feedback}\n\n"
+                f"## Available workers\n{roster}"
+            )
+            routing_input = clip_memory(routing_input, MAX_MANAGER_MEMORY_CHARS)
+
+            with st.status(f"Manager · {manager['name']} 피드백 분석 및 작업 분류 중", expanded=True) as status:
+                routing_prompt = session.get("manager_routing_prompt", DEFAULT_MANAGER_ROUTING_PROMPT)
+                routing_agent = dict(manager)
+                routing_agent["system_prompt"] = (
+                    manager.get("system_prompt", "").strip()
+                    + "\n\n[Hierarchical feedback routing mode]\n"
+                    + routing_prompt.strip()
+                ).strip()
+                routing_text, routing_usage = call_agent(
+                    client=client,
+                    agent=routing_agent,
+                    primary_input=routing_input,
+                    additional_prompt="Analyze the latest feedback and return the routing decision now.",
+                    rag_context="",
+                    execution_file_context="",
+                )
+                try:
+                    raw_decision = extract_json_object(routing_text)
+                except Exception:
+                    raw_decision = {}
+                decision = normalize_routing_decision(raw_decision, registry, feedback)
+                routing_steps.append(
+                    {
+                        "target_id": "hier_manager",
+                        "agent_id": manager.get("id"),
+                        "stage_label": f"Revision {current_revision + 1} · Manager Routing",
+                        "agent_name": manager["name"],
+                        "model": manager["model"],
+                        "primary_input": routing_input,
+                        "additional_prompt": session.get("manager_routing_prompt", DEFAULT_MANAGER_ROUTING_PROMPT),
+                        "execution_files": [],
+                        "rag_sources": [],
+                        "rag_truncated": False,
+                        "output": routing_text,
+                        "usage": routing_usage,
+                    }
+                )
+                status.update(label=f"Manager · {manager['name']} 작업 분류 완료", state="complete")
+
+            registry_by_key = {item["worker_key"]: item for item in registry}
+            new_worker_outputs = {}
+            assignments = decision.get("assignments", [])
+
+            if assignments:
+                progress = st.progress(0.0)
+                for index, assignment in enumerate(assignments, start=1):
+                    item = registry_by_key.get(assignment["worker_key"])
+                    if not item:
+                        continue
+                    worker_agent = st.session_state.agents[item["agent_id"]]
+                    prior_worker_output = session.get("latest_worker_outputs", {}).get(item["worker_id"], "")
+                    manager_task = assignment.get("task", feedback)
+
+                    worker_input = (
+                        f"## Original user request\n{clip_memory(session.get('original_user_prompt', ''), 16000)}\n\n"
+                        f"## Previous Manager final report\n{clip_memory(previous_final, 22000)}\n\n"
+                        f"## User's latest feedback\n{feedback}\n\n"
+                        f"## Manager routing reason\n{decision.get('reason', '')}\n\n"
+                        f"## Your assigned revision task\n{manager_task}\n\n"
+                        f"## Your previous output from this workflow\n{clip_memory(prior_worker_output, 22000) or 'No previous output.'}\n\n"
+                        "Rework only what is necessary for this revision. Preserve valid prior findings, explicitly correct anything that changes, "
+                        "and return a concrete result to the Manager."
+                    )
+                    worker_extra_parts = []
+                    if item.get("additional_prompt", "").strip():
+                        worker_extra_parts.append(item["additional_prompt"].strip())
+                    worker_extra_parts.append(f"Manager revision assignment:\n{manager_task}")
+                    worker_extra = "\n\n".join(worker_extra_parts)
+
+                    with st.status(
+                        f"{item['worker_key']} · {worker_agent['name']} 선택 재실행 중",
+                        expanded=True,
+                    ) as status:
+                        worker_output, worker_result = execute_agent_stage(
+                            client=client,
+                            agent=worker_agent,
+                            primary_input=worker_input,
+                            additional_prompt=worker_extra,
+                            target_id=item["worker_id"],
+                            stage_label=f"Revision {current_revision + 1} · {worker_agent['name']}",
+                            execution_context_by_target=execution_context_by_target,
+                            execution_filenames_by_target=execution_filenames_by_target,
+                        )
+                        new_worker_outputs[item["worker_id"]] = worker_output
+                        routing_steps.append(worker_result)
+                        status.update(label=f"{worker_agent['name']} 재작업 완료", state="complete")
+                    progress.progress(index / max(len(assignments), 1))
+
+            latest_worker_outputs = dict(session.get("latest_worker_outputs", {}))
+            latest_worker_outputs.update(new_worker_outputs)
+
+            latest_worker_blocks = []
+            for item in registry:
+                output = latest_worker_outputs.get(item["worker_id"], "")
+                if not output:
+                    continue
+                changed = item["worker_id"] in new_worker_outputs
+                latest_worker_blocks.append(
+                    f"## {item['worker_key']} · {item['name']} · {'UPDATED THIS REVISION' if changed else 'PRESERVED FROM PRIOR REVISION'}\n"
+                    f"{clip_memory(output, MAX_MEMORY_OUTPUT_CHARS)}"
+                )
+
+            assignment_summary = json.dumps(decision, ensure_ascii=False, indent=2)
+            synthesis_input = (
+                f"## Original user request\n{clip_memory(session.get('original_user_prompt', ''), 16000)}\n\n"
+                f"## Previous final report (v{current_revision})\n{clip_memory(previous_final, 26000)}\n\n"
+                f"## User feedback for revision v{current_revision + 1}\n{feedback}\n\n"
+                f"## Manager routing decision\n{assignment_summary}\n\n"
+                f"## Conversation memory\n{compact_chat_history(chat_history)}\n\n"
+                f"## Latest worker evidence\n" + ("\n\n---\n\n".join(latest_worker_blocks) or "No worker output was required for this revision.")
+            )
+            synthesis_input = clip_memory(synthesis_input, MAX_MANAGER_MEMORY_CHARS)
+            revision_prompt = (
+                session.get("manager_synthesis_prompt", DEFAULT_MANAGER_SYNTHESIS_PROMPT).strip()
+                + "\n\n"
+                + DEFAULT_MANAGER_REVISION_PROMPT
+            )
+
+            with st.status(f"Manager · {manager['name']} Revision v{current_revision + 1} 최종 재판정 중", expanded=True) as status:
+                final_output, final_result = execute_agent_stage(
+                    client=client,
+                    agent=manager,
+                    primary_input=synthesis_input,
+                    additional_prompt=revision_prompt,
+                    target_id="hier_manager",
+                    stage_label=f"Revision {current_revision + 1} · Manager Synthesis",
+                    execution_context_by_target=execution_context_by_target,
+                    execution_filenames_by_target=execution_filenames_by_target,
+                )
+                routing_steps.append(final_result)
+                status.update(label=f"Manager · {manager['name']} Revision v{current_revision + 1} 완료", state="complete")
+
+            selected_names = [
+                registry_by_key[a["worker_key"]]["name"]
+                for a in assignments
+                if a.get("worker_key") in registry_by_key
+            ]
+            routing_summary = (
+                f"v{current_revision + 1} · "
+                + ("재실행: " + ", ".join(selected_names) if selected_names else "Manager 직접 재판단")
+            )
+            chat_history.append(
+                {
+                    "role": "assistant",
+                    "content": final_output,
+                    "routing_summary": routing_summary,
+                    "manager_message": decision.get("manager_message", ""),
+                }
+            )
+
+            new_revision = current_revision + 1
+            session["current_final_output"] = final_output
+            session["latest_worker_outputs"] = latest_worker_outputs
+            session.setdefault("revisions", []).append(
+                {
+                    "revision": new_revision,
+                    "kind": "feedback",
+                    "title": "사용자 피드백 반영",
+                    "feedback": feedback,
+                    "routing": decision,
+                    "worker_outputs": new_worker_outputs,
+                    "final_output": final_output,
+                    "steps": routing_steps,
+                }
+            )
+
+            if (
+                st.session_state.get("last_run")
+                and st.session_state.last_run.get("mode") == "Hierarchical"
+                and st.session_state.last_run.get("session_id") == session.get("session_id")
+            ):
+                st.session_state.last_run["final_output"] = final_output
+                st.session_state.last_run["revision_count"] = new_revision
+
+            st.session_state.hier_feedback_form_version += 1
+            st.rerun()
+
+        except Exception as exc:
+            if chat_history and chat_history[-1].get("role") == "user" and chat_history[-1].get("content") == feedback:
+                chat_history.pop()
+            st.error(f"Manager 피드백 반영 중 오류가 발생했습니다: {exc}")
+
+    st.markdown("#### 📜 Revision History")
+    revisions = session.get("revisions", [])
+    for revision in reversed(revisions[-10:]):
+        number = revision.get("revision", "?")
+        title = revision.get("title", "Revision")
+        with st.expander(f"v{number} · {title}", expanded=False):
+            if revision.get("feedback"):
+                st.markdown("**사용자 피드백**")
+                st.write(revision["feedback"])
+            routing = revision.get("routing")
+            if routing:
+                st.markdown("**Manager 판단**")
+                st.write(routing.get("reason", ""))
+                assignments = routing.get("assignments", [])
+                if assignments:
+                    names = []
+                    registry_map = {item["worker_key"]: item for item in registry}
+                    for assignment in assignments:
+                        item = registry_map.get(assignment.get("worker_key"))
+                        names.append(item["name"] if item else assignment.get("worker_key", "Worker"))
+                    st.caption("재실행 Worker · " + " · ".join(names))
+                else:
+                    st.caption("추가 Worker 실행 없음 · Manager 직접 재판단")
+            st.markdown("**최종안**")
+            st.write(revision.get("final_output", ""))
+
+    session_export = {
+        "session_id": session.get("session_id"),
+        "original_user_prompt": session.get("original_user_prompt"),
+        "manager": session.get("manager_name"),
+        "worker_names": [item["name"] for item in registry],
+        "execution_file_names": session.get("execution_filenames_by_target", {}),
+        "chat_history": session.get("chat_history", []),
+        "revisions": [
+            {
+                "revision": rev.get("revision"),
+                "kind": rev.get("kind"),
+                "title": rev.get("title"),
+                "feedback": rev.get("feedback"),
+                "routing": rev.get("routing"),
+                "final_output": rev.get("final_output"),
+            }
+            for rev in session.get("revisions", [])
+        ],
+        "current_final_output": session.get("current_final_output"),
+    }
+    st.download_button(
+        "Manager 대화 · Revision 기록 JSON 다운로드",
+        data=json.dumps(session_export, ensure_ascii=False, indent=2),
+        file_name="hierarchical_manager_session.json",
         mime="application/json",
         use_container_width=True,
     )
@@ -1132,6 +1652,13 @@ with tabs[1]:
                 height=130,
                 key="hier_manager_synthesis_prompt",
             )
+            st.session_state.hierarchy["manager_routing_prompt"] = st.text_area(
+                "Manager 피드백 라우팅 프롬프트",
+                value=st.session_state.hierarchy.get("manager_routing_prompt", DEFAULT_MANAGER_ROUTING_PROMPT),
+                height=150,
+                key="hier_manager_routing_prompt",
+                help="최초 실행 후 사용자 피드백이 들어오면 Manager가 어떤 Worker에게 재작업을 맡길지 판단할 때 사용합니다.",
+            )
 
             st.divider()
             add_worker_agent = st.selectbox(
@@ -1337,6 +1864,11 @@ with tabs[2]:
         st.error("User Prompt가 비어 있습니다. 요청을 작성한 뒤 실행 버튼을 다시 눌러주세요.")
 
     if run_clicked and user_prompt.strip():
+        # A fresh Hierarchical run starts a new conversation/revision session.
+        # This prevents feedback from an older run from leaking into the new workflow.
+        if mode == "Hierarchical":
+            st.session_state.hierarchical_session = None
+
         client = OpenAI(api_key=api_key)
         results = []
         previous_output = None
@@ -1385,37 +1917,16 @@ with tabs[2]:
             st.warning(warning)
 
         def run_stage(agent, primary_input, additional_prompt, target_id, stage_label):
-            rag_context = ""
-            rag_sources = []
-            rag_truncated = False
-            if agent.get("rag_enabled") and agent.get("rag_files"):
-                retrieval_query = primary_input
-                if additional_prompt:
-                    retrieval_query += f"\n\nAdditional instruction:\n{additional_prompt}"
-                rag_context, rag_sources, rag_truncated = retrieve_rag(client, agent, retrieval_query)
-
-            execution_file_context = "\n\n---\n\n".join(execution_context_by_target.get(target_id, []))
-            output, usage = call_agent(
+            return execute_agent_stage(
                 client=client,
                 agent=agent,
                 primary_input=primary_input,
                 additional_prompt=additional_prompt,
-                rag_context=rag_context,
-                execution_file_context=execution_file_context,
+                target_id=target_id,
+                stage_label=stage_label,
+                execution_context_by_target=execution_context_by_target,
+                execution_filenames_by_target=execution_filenames_by_target,
             )
-            result = {
-                "stage_label": stage_label,
-                "agent_name": agent["name"],
-                "model": agent["model"],
-                "primary_input": primary_input,
-                "additional_prompt": additional_prompt,
-                "execution_files": execution_filenames_by_target.get(target_id, []),
-                "rag_sources": rag_sources,
-                "rag_truncated": rag_truncated,
-                "output": output,
-                "usage": usage,
-            }
-            return output, result
 
         try:
             if mode == "Linear":
@@ -1460,8 +1971,11 @@ with tabs[2]:
                 for idx, worker in enumerate(workers):
                     worker_agent = st.session_state.agents[worker["agent_id"]]
                     extra = worker.get("additional_prompt", "").strip() or "No extra worker instruction."
+                    worker_role = clip_memory(worker_agent.get("system_prompt", ""), 2400)
                     roster_lines.append(
-                        f"Worker {idx+1}: {worker_agent['name']}\nConfigured worker instruction: {extra}"
+                        f"Worker {idx+1}: {worker_agent['name']}\n"
+                        f"Agent role/system instruction: {worker_role}\n"
+                        f"Configured worker instruction: {extra}"
                     )
                 roster = "\n\n".join(roster_lines)
 
@@ -1483,6 +1997,7 @@ with tabs[2]:
                 progress.progress(completed_calls / total_calls)
 
                 worker_outputs = []
+                latest_worker_outputs = {}
                 for idx, worker in enumerate(workers):
                     worker_agent = st.session_state.agents[worker["agent_id"]]
                     worker_extra = worker.get("additional_prompt", "").strip()
@@ -1505,6 +2020,7 @@ with tabs[2]:
                         worker_outputs.append(
                             f"## Worker {idx+1}: {worker_agent['name']}\n{worker_output}"
                         )
+                        latest_worker_outputs[worker["worker_id"]] = worker_output
                         status.update(label=f"Worker {idx+1} · {worker_agent['name']} 완료", state="complete")
                     completed_calls += 1
                     progress.progress(completed_calls / total_calls)
@@ -1527,8 +2043,49 @@ with tabs[2]:
                 completed_calls += 1
                 progress.progress(completed_calls / total_calls)
 
+                session_id = str(uuid.uuid4())
+                worker_session_configs = [
+                    {
+                        "worker_id": worker["worker_id"],
+                        "agent_id": worker["agent_id"],
+                        "additional_prompt": worker.get("additional_prompt", ""),
+                    }
+                    for worker in workers
+                ]
+
+                st.session_state.hierarchical_session = {
+                    "session_id": session_id,
+                    "original_user_prompt": user_prompt.strip(),
+                    "manager_agent_id": hierarchy["manager_agent_id"],
+                    "manager_name": manager["name"],
+                    "manager_planning_prompt": hierarchy.get("manager_planning_prompt", DEFAULT_MANAGER_PLANNING_PROMPT),
+                    "manager_synthesis_prompt": hierarchy.get("manager_synthesis_prompt", DEFAULT_MANAGER_SYNTHESIS_PROMPT),
+                    "manager_routing_prompt": hierarchy.get("manager_routing_prompt", DEFAULT_MANAGER_ROUTING_PROMPT),
+                    "workers": worker_session_configs,
+                    "initial_manager_plan": manager_plan,
+                    "current_final_output": final_output,
+                    "latest_worker_outputs": latest_worker_outputs,
+                    "chat_history": [],
+                    "execution_context_by_target": execution_context_by_target,
+                    "execution_filenames_by_target": execution_filenames_by_target,
+                    "revisions": [
+                        {
+                            "revision": 1,
+                            "kind": "initial",
+                            "title": "최초 실행",
+                            "feedback": "",
+                            "routing": None,
+                            "worker_outputs": dict(latest_worker_outputs),
+                            "final_output": final_output,
+                            "steps": results,
+                        }
+                    ],
+                }
+
                 st.session_state.last_run = {
                     "mode": "Hierarchical",
+                    "session_id": session_id,
+                    "revision_count": 1,
                     "user_prompt": user_prompt.strip(),
                     "workflow": {
                         "manager": manager["name"],
@@ -1556,3 +2113,5 @@ with tabs[2]:
                 }
 
     render_last_run(st.session_state.last_run)
+    if mode == "Hierarchical":
+        render_hierarchical_feedback_panel(api_key)
