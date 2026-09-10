@@ -1299,9 +1299,15 @@ with tabs[2]:
         st.markdown("#### 실행 준비 상태")
         status_cols = st.columns(3)
         with status_cols[0]:
-            st.success("✓ API Key") if api_key else st.error("✕ API Key")
+            if api_key:
+                st.success("✓ API Key")
+            else:
+                st.error("✕ API Key")
         with status_cols[1]:
-            st.success(f"✓ {mode} Workflow") if workflow_is_ready else st.error(f"✕ {mode} Workflow")
+            if workflow_is_ready:
+                st.success(f"✓ {mode} Workflow")
+            else:
+                st.error(f"✕ {mode} Workflow")
         with status_cols[2]:
             st.info("User Prompt는 실행 버튼 클릭 시 확인")
 
