@@ -1929,7 +1929,7 @@ with tabs[1]:
                             else "📎 참고자료 없음" if not manager.get("rag_files") else "📎 참고자료 사용 안 함"
                         )
                         st.caption(f"{manager['model']} · {manager_rag_label}")
-                        st.caption("사용자 요청 분석 · Worker 업무 분배")
+                        st.caption("하위 Agent에게 업무를 분배하고 결과를 검증하여 최종 답변을 작성합니다.")
                     else:
                         st.markdown("#### Manager 미선택")
                         st.caption("위 선택창에서 Manager를 지정하세요.")
@@ -2068,28 +2068,33 @@ with tabs[1]:
                     st.rerun()
 
             st.divider()
-            st.markdown("#### Manager 세부 설정")
-            st.caption("Manager의 동작 규칙입니다. STEP 4에서 고급 설정으로 정리할 예정이며, 현재 값과 동작은 그대로 유지됩니다.")
+            with st.expander("⚙ Manager 고급 설정", expanded=False):
+                st.caption(
+                    "Manager가 작업을 나누고, Worker 결과를 검토하고, 후속 피드백을 처리하는 규칙입니다. "
+                    "일반적인 사용에서는 기본값을 그대로 두어도 됩니다."
+                )
 
-            st.session_state.hierarchy["manager_planning_prompt"] = st.text_area(
-                "Manager 작업 분배 프롬프트",
-                value=st.session_state.hierarchy.get("manager_planning_prompt", DEFAULT_MANAGER_PLANNING_PROMPT),
-                height=130,
-                key="hier_manager_planning_prompt",
-            )
-            st.session_state.hierarchy["manager_synthesis_prompt"] = st.text_area(
-                "Manager 최종 종합 프롬프트",
-                value=st.session_state.hierarchy.get("manager_synthesis_prompt", DEFAULT_MANAGER_SYNTHESIS_PROMPT),
-                height=130,
-                key="hier_manager_synthesis_prompt",
-            )
-            st.session_state.hierarchy["manager_routing_prompt"] = st.text_area(
-                "Manager 피드백 라우팅 프롬프트",
-                value=st.session_state.hierarchy.get("manager_routing_prompt", DEFAULT_MANAGER_ROUTING_PROMPT),
-                height=150,
-                key="hier_manager_routing_prompt",
-                help="최초 실행 후 사용자 피드백이 들어오면 Manager가 어떤 Worker에게 재작업을 맡길지 판단할 때 사용합니다.",
-            )
+                st.session_state.hierarchy["manager_planning_prompt"] = st.text_area(
+                    "작업 분배 규칙",
+                    value=st.session_state.hierarchy.get("manager_planning_prompt", DEFAULT_MANAGER_PLANNING_PROMPT),
+                    height=130,
+                    key="hier_manager_planning_prompt",
+                    help="최초 요청을 분석하고 어떤 업무를 Worker에게 맡길지 정하는 Manager 규칙입니다.",
+                )
+                st.session_state.hierarchy["manager_synthesis_prompt"] = st.text_area(
+                    "최종 결과 작성 규칙",
+                    value=st.session_state.hierarchy.get("manager_synthesis_prompt", DEFAULT_MANAGER_SYNTHESIS_PROMPT),
+                    height=130,
+                    key="hier_manager_synthesis_prompt",
+                    help="Worker 결과를 비교·검증한 뒤 Manager가 최종 답변을 작성할 때 사용하는 규칙입니다.",
+                )
+                st.session_state.hierarchy["manager_routing_prompt"] = st.text_area(
+                    "피드백 처리 규칙",
+                    value=st.session_state.hierarchy.get("manager_routing_prompt", DEFAULT_MANAGER_ROUTING_PROMPT),
+                    height=150,
+                    key="hier_manager_routing_prompt",
+                    help="최초 실행 후 사용자 피드백이 들어오면 Manager가 직접 처리할지, 어떤 Worker에게 재작업을 맡길지 판단하는 규칙입니다.",
+                )
 
 
 with tabs[2]:
