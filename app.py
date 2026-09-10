@@ -1363,342 +1363,359 @@ with st.sidebar:
 tabs = st.tabs(["1. 에이전트", "2. Workflow Builder", "3. 실행"])
 
 with tabs[0]:
-    # STEP 2 UX: Agent Library first, configuration only when requested.
-    header_left, header_right = st.columns([6, 1.35], vertical_alignment="bottom")
-    with header_left:
-        st.subheader("에이전트")
-        st.caption("업무에 사용할 전문 AI Agent를 만들고 관리하세요.")
-    with header_right:
-        if st.button(
-            "＋ 새 Agent",
-            type="primary",
-            use_container_width=True,
-            key="open_create_agent",
-        ):
-            st.session_state.agent_create_open = not st.session_state.get("agent_create_open", False)
-            st.session_state.agent_editing_id = None
-            st.session_state.agent_delete_confirm_id = None
-            st.rerun()
+    # STEP 2 refinement: master-detail Agent editor.
+    # The left navigator stays visible while the right detail pane scrolls independently,
+    # so users can switch Agents without returning to the top of the page.
+    st.subheader("에이전트")
+    st.caption("왼쪽에서 Agent를 선택하고 오른쪽에서 상세 설정을 수정하세요.")
 
-    # Guard against stale UI selection after a workspace import or deletion.
+    # Guard against stale UI selection after workspace import or deletion.
     editing_id = st.session_state.get("agent_editing_id")
     if editing_id is not None and editing_id not in st.session_state.agents:
         st.session_state.agent_editing_id = None
         st.session_state.agent_delete_confirm_id = None
         editing_id = None
 
-    # Create form is hidden by default.
-    if st.session_state.get("agent_create_open", False):
-        with st.container(border=True):
-            st.markdown("### 새 Agent 만들기")
-            st.caption("기본 역할을 먼저 설정하고, 필요할 때만 참고자료(RAG)를 추가하세요.")
+    # When Agents already exist, open the first one by default unless the create pane is active.
+    if (
+        st.session_state.agents
+        and not st.session_state.get("agent_create_open", False)
+        and st.session_state.get("agent_editing_id") not in st.session_state.agents
+    ):
+        st.session_state.agent_editing_id = next(iter(st.session_state.agents))
+        editing_id = st.session_state.agent_editing_id
 
-            create_form_version = st.session_state.create_agent_form_version
-            with st.form(
-                f"create_agent_form_{create_form_version}",
-                clear_on_submit=False,
-                enter_to_submit=False,
+    nav_col, detail_col = st.columns([1.35, 4.65], gap="large", vertical_alignment="top")
+
+    with nav_col:
+        # Fixed-height local navigator: only this list scrolls when many Agents exist.
+        with st.container(height=760, border=True):
+            nav_head_left, nav_head_right = st.columns([3, 1], vertical_alignment="center")
+            with nav_head_left:
+                st.markdown("#### My Agents")
+            with nav_head_right:
+                st.caption(f"{len(st.session_state.agents)}개")
+
+            if st.button(
+                "＋ 새 Agent",
+                type="primary" if st.session_state.get("agent_create_open", False) else "secondary",
+                use_container_width=True,
+                key="open_create_agent",
             ):
-                col1, col2 = st.columns([1, 1])
-                with col1:
-                    new_name = st.text_input(
-                        "Agent 이름",
-                        placeholder="예: 데이터 분석가",
-                        key=f"new_agent_name_{create_form_version}",
-                    )
-                with col2:
-                    new_model = st.text_input(
-                        "Model",
-                        value=DEFAULT_MODEL,
-                        help="예: gpt-5.6-luna, gpt-5.6-terra, gpt-5.6-sol. 계정에서 사용 가능한 다른 모델 ID도 입력할 수 있습니다.",
-                        key=f"new_agent_model_{create_form_version}",
-                    )
-
-                new_system = st.text_area(
-                    "역할 / System Prompt",
-                    height=180,
-                    placeholder="이 Agent의 역할, 판단 기준, 출력 형식, 금지사항 등을 지정하세요.",
-                    key=f"new_agent_system_{create_form_version}",
-                )
-
-                with st.expander("📎 참고자료 (RAG) 설정 · 선택사항", expanded=False):
-                    new_rag = st.checkbox(
-                        "참고자료 사용",
-                        key=f"new_agent_rag_{create_form_version}",
-                        help="켜면 등록한 파일에서 관련 내용을 검색해 Agent 입력에 함께 제공합니다.",
-                    )
-                    new_files = st.file_uploader(
-                        "참고자료 파일 추가",
-                        type=SUPPORTED_TYPES,
-                        accept_multiple_files=True,
-                        key=f"new_agent_files_{create_form_version}",
-                        help="PDF · DOCX · PPTX · XLSX · CSV · TXT · MD",
-                    )
-                    st.caption("검색 고급 설정")
-                    new_top_k = st.slider(
-                        "RAG Top-K",
-                        min_value=1,
-                        max_value=8,
-                        value=4,
-                        key=f"new_agent_top_k_{create_form_version}",
-                        help="질문과 가장 관련 있는 참고자료 조각을 몇 개까지 Agent에 전달할지 정합니다.",
-                    )
-
-                create_cancel_col, create_submit_col = st.columns([1, 1])
-                with create_cancel_col:
-                    cancel_create = st.form_submit_button(
-                        "취소",
-                        use_container_width=True,
-                    )
-                with create_submit_col:
-                    create_agent = st.form_submit_button(
-                        "Agent 만들기",
-                        type="primary",
-                        use_container_width=True,
-                    )
-
-            if cancel_create:
-                st.session_state.agent_create_open = False
-                st.session_state.create_agent_form_version += 1
+                st.session_state.agent_create_open = True
+                st.session_state.agent_editing_id = None
+                st.session_state.agent_delete_confirm_id = None
                 st.rerun()
 
-            if create_agent:
-                validation_errors = []
-                if not new_name.strip():
-                    validation_errors.append("Agent 이름을 입력하세요.")
-                if not new_model.strip():
-                    validation_errors.append("Model ID를 입력하세요.")
-                if not new_system.strip():
-                    validation_errors.append("System Prompt를 입력하세요.")
+            st.divider()
 
-                if validation_errors:
-                    st.error(
-                        "Agent를 생성할 수 없습니다. 아래 항목을 확인해 주세요.\n\n"
-                        + "\n".join(f"- {message}" for message in validation_errors)
+            if not st.session_state.agents:
+                st.caption("아직 Agent가 없습니다.")
+            else:
+                for agent_id, agent in st.session_state.agents.items():
+                    is_selected = (
+                        not st.session_state.get("agent_create_open", False)
+                        and st.session_state.get("agent_editing_id") == agent_id
                     )
-                    st.info("작성한 내용은 유지됩니다. 수정한 뒤 **Agent 만들기**를 다시 클릭하세요.")
-                else:
-                    agent_id = str(uuid.uuid4())
-                    st.session_state.agents[agent_id] = {
-                        "id": agent_id,
-                        "name": new_name.strip(),
-                        "model": new_model.strip(),
-                        "system_prompt": new_system.strip(),
-                        "rag_enabled": bool(new_rag),
-                        "rag_top_k": int(new_top_k),
-                        "rag_files": uploaded_to_items(new_files),
-                    }
-                    st.session_state.agent_create_open = False
-                    st.session_state.agent_editing_id = None
-                    st.session_state.agent_delete_confirm_id = None
-                    st.session_state.create_agent_form_version += 1
-                    st.success(f"'{new_name.strip()}' Agent를 만들었습니다.")
-                    st.rerun()
+                    if st.button(
+                        agent["name"],
+                        type="primary" if is_selected else "secondary",
+                        use_container_width=True,
+                        key=f"agent_nav_{agent_id}",
+                    ):
+                        st.session_state.agent_editing_id = agent_id
+                        st.session_state.agent_create_open = False
+                        st.session_state.agent_delete_confirm_id = None
+                        st.rerun()
 
-    st.markdown(
-        f'<div class="agent-library-kicker">MY AGENTS · {len(st.session_state.agents)}</div>',
-        unsafe_allow_html=True,
-    )
+    with detail_col:
+        # The detail pane scrolls independently from the Agent navigator.
+        with st.container(height=760, border=True):
+            if st.session_state.get("agent_create_open", False):
+                st.markdown("### ＋ 새 Agent 만들기")
+                st.caption("기본 역할을 설정하고, 필요할 때만 참고자료(RAG)를 추가하세요.")
 
-    if not st.session_state.agents:
-        st.markdown(
-            '''
-            <div class="agent-empty">
-                <div class="agent-empty-icon">🤖</div>
-                <strong>아직 Agent가 없습니다</strong><br>
-                <span style="opacity:.68">반복해서 사용할 전문 AI Agent를 만들어 Workflow에 연결할 수 있습니다.</span>
-            </div>
-            ''',
-            unsafe_allow_html=True,
-        )
-        if st.button(
-            "＋ 첫 Agent 만들기",
-            type="primary",
-            use_container_width=True,
-            key="empty_create_agent",
-        ):
-            st.session_state.agent_create_open = True
-            st.session_state.agent_editing_id = None
-            st.rerun()
-    else:
-        agent_items = list(st.session_state.agents.items())
-        for row_start in range(0, len(agent_items), 2):
-            cols = st.columns(2, gap="large")
-            for offset, (agent_id, agent) in enumerate(agent_items[row_start:row_start + 2]):
-                with cols[offset]:
-                    file_count = len(agent.get("rag_files", []))
-                    rag_on = bool(agent.get("rag_enabled", False))
-                    with st.container(border=True):
-                        st.markdown(f"### 🤖 {agent['name']}")
-                        st.caption(agent.get("model", DEFAULT_MODEL))
-
-                        if file_count:
-                            st.markdown(f"📎 참고자료 **{file_count}개**")
-                        else:
-                            st.markdown("📎 참고자료 없음")
-
-                        if rag_on:
-                            st.caption("● 참고자료 사용 중")
-                        else:
-                            st.caption("○ 참고자료 사용 안 함")
-
-                        if st.button(
-                            "⚙ 설정",
-                            use_container_width=True,
-                            key=f"open_agent_settings_{agent_id}",
-                        ):
-                            st.session_state.agent_editing_id = agent_id
-                            st.session_state.agent_create_open = False
-                            st.session_state.agent_delete_confirm_id = None
-                            st.rerun()
-
-    # A single settings panel is rendered only for the Agent the user chose.
-    editing_id = st.session_state.get("agent_editing_id")
-    if editing_id in st.session_state.agents:
-        agent = st.session_state.agents[editing_id]
-        st.divider()
-        with st.container(border=True):
-            settings_head, settings_close = st.columns([6, 1], vertical_alignment="center")
-            with settings_head:
-                st.markdown(f"### ⚙ {agent['name']} 설정")
-                st.caption("Agent의 기본 정보, 역할, 참고자료를 수정합니다.")
-            with settings_close:
-                if st.button(
-                    "닫기",
-                    use_container_width=True,
-                    key=f"close_agent_settings_{editing_id}",
+                create_form_version = st.session_state.create_agent_form_version
+                with st.form(
+                    f"create_agent_form_{create_form_version}",
+                    clear_on_submit=False,
+                    enter_to_submit=False,
                 ):
-                    st.session_state.agent_editing_id = None
-                    st.session_state.agent_delete_confirm_id = None
+                    col1, col2 = st.columns([1, 1])
+                    with col1:
+                        new_name = st.text_input(
+                            "Agent 이름",
+                            placeholder="예: 데이터 분석가",
+                            key=f"new_agent_name_{create_form_version}",
+                        )
+                    with col2:
+                        new_model = st.text_input(
+                            "Model",
+                            value=DEFAULT_MODEL,
+                            help="예: gpt-5.6-luna, gpt-5.6-terra, gpt-5.6-sol. 계정에서 사용 가능한 다른 모델 ID도 입력할 수 있습니다.",
+                            key=f"new_agent_model_{create_form_version}",
+                        )
+
+                    new_system = st.text_area(
+                        "역할 / System Prompt",
+                        height=220,
+                        placeholder="이 Agent의 역할, 판단 기준, 출력 형식, 금지사항 등을 지정하세요.",
+                        key=f"new_agent_system_{create_form_version}",
+                    )
+
+                    with st.expander("📎 참고자료 (RAG) · 선택사항", expanded=False):
+                        new_rag = st.checkbox(
+                            "참고자료 사용",
+                            key=f"new_agent_rag_{create_form_version}",
+                            help="켜면 등록한 파일에서 관련 내용을 검색해 Agent 입력에 함께 제공합니다.",
+                        )
+                        new_files = st.file_uploader(
+                            "참고자료 파일 추가",
+                            type=SUPPORTED_TYPES,
+                            accept_multiple_files=True,
+                            key=f"new_agent_files_{create_form_version}",
+                            help="PDF · DOCX · PPTX · XLSX · CSV · TXT · MD",
+                        )
+                        st.caption("검색 고급 설정 · RAG Top-K")
+                        new_top_k = st.slider(
+                            "RAG Top-K",
+                            min_value=1,
+                            max_value=8,
+                            value=4,
+                            key=f"new_agent_top_k_{create_form_version}",
+                            help="질문과 가장 관련 있는 참고자료 조각을 몇 개까지 Agent에 전달할지 정합니다.",
+                        )
+
+                    create_cancel_col, create_submit_col = st.columns([1, 1])
+                    with create_cancel_col:
+                        cancel_create = st.form_submit_button(
+                            "취소",
+                            use_container_width=True,
+                        )
+                    with create_submit_col:
+                        create_agent = st.form_submit_button(
+                            "Agent 만들기",
+                            type="primary",
+                            use_container_width=True,
+                        )
+
+                if cancel_create:
+                    st.session_state.agent_create_open = False
+                    st.session_state.create_agent_form_version += 1
+                    if st.session_state.agents:
+                        st.session_state.agent_editing_id = next(iter(st.session_state.agents))
                     st.rerun()
 
-            with st.form(f"edit_agent_{editing_id}"):
-                with st.expander("기본 설정", expanded=True):
+                if create_agent:
+                    validation_errors = []
+                    if not new_name.strip():
+                        validation_errors.append("Agent 이름을 입력하세요.")
+                    if not new_model.strip():
+                        validation_errors.append("Model ID를 입력하세요.")
+                    if not new_system.strip():
+                        validation_errors.append("System Prompt를 입력하세요.")
+
+                    if validation_errors:
+                        st.error(
+                            "Agent를 생성할 수 없습니다. 아래 항목을 확인해 주세요.\n\n"
+                            + "\n".join(f"- {message}" for message in validation_errors)
+                        )
+                        st.info("작성한 내용은 유지됩니다. 수정한 뒤 **Agent 만들기**를 다시 클릭하세요.")
+                    else:
+                        agent_id = str(uuid.uuid4())
+                        st.session_state.agents[agent_id] = {
+                            "id": agent_id,
+                            "name": new_name.strip(),
+                            "model": new_model.strip(),
+                            "system_prompt": new_system.strip(),
+                            "rag_enabled": bool(new_rag),
+                            "rag_top_k": int(new_top_k),
+                            "rag_files": uploaded_to_items(new_files),
+                        }
+                        st.session_state.agent_create_open = False
+                        st.session_state.agent_editing_id = agent_id
+                        st.session_state.agent_delete_confirm_id = None
+                        st.session_state.create_agent_form_version += 1
+                        st.success(f"'{new_name.strip()}' Agent를 만들었습니다.")
+                        st.rerun()
+
+            elif st.session_state.get("agent_editing_id") in st.session_state.agents:
+                editing_id = st.session_state.agent_editing_id
+                agent = st.session_state.agents[editing_id]
+                file_count = len(agent.get("rag_files", []))
+                rag_on = bool(agent.get("rag_enabled", False))
+
+                settings_head, settings_meta = st.columns([4.2, 1.8], vertical_alignment="center")
+                with settings_head:
+                    st.markdown(f"### ⚙ {agent['name']}")
+                    st.caption("Agent의 기본 정보와 역할을 수정합니다.")
+                with settings_meta:
+                    st.caption(agent.get("model", DEFAULT_MODEL))
+                    st.caption(
+                        f"📎 참고자료 {file_count}개 · {'사용 중' if rag_on else '사용 안 함'}"
+                        if file_count
+                        else "📎 참고자료 없음"
+                    )
+
+                st.divider()
+
+                with st.form(f"edit_agent_{editing_id}"):
                     e_col1, e_col2 = st.columns(2)
                     with e_col1:
                         e_name = st.text_input("Agent 이름", value=agent["name"])
                     with e_col2:
                         e_model = st.text_input("Model ID", value=agent["model"])
 
-                with st.expander("역할 / System Prompt", expanded=False):
                     e_system = st.text_area(
-                        "System Prompt",
+                        "역할 / System Prompt",
                         value=agent["system_prompt"],
-                        height=220,
+                        height=260,
                         help="Agent가 어떤 역할과 기준으로 행동할지 정의합니다.",
                     )
 
-                with st.expander("📎 참고자료 (RAG)", expanded=False):
-                    e_rag = st.checkbox(
-                        "참고자료 사용",
-                        value=agent.get("rag_enabled", False),
-                    )
+                    with st.expander("📎 참고자료 (RAG)", expanded=False):
+                        e_rag = st.checkbox(
+                            "참고자료 사용",
+                            value=agent.get("rag_enabled", False),
+                        )
 
-                    existing_names = [f["name"] for f in agent.get("rag_files", [])]
-                    if existing_names:
-                        st.markdown("**현재 참고자료**")
-                        for existing_name in existing_names:
-                            st.caption(f"• {existing_name}")
-                    else:
-                        st.caption("등록된 참고자료가 없습니다.")
+                        existing_names = [f["name"] for f in agent.get("rag_files", [])]
+                        if existing_names:
+                            st.markdown("**현재 참고자료**")
+                            for existing_name in existing_names:
+                                st.caption(f"• {existing_name}")
+                        else:
+                            st.caption("등록된 참고자료가 없습니다.")
 
-                    remove_names = st.multiselect(
-                        "삭제할 참고자료",
-                        options=existing_names,
-                        help="선택한 파일은 변경사항을 저장할 때 제거됩니다.",
-                    )
-                    add_files = st.file_uploader(
-                        "참고자료 추가",
-                        type=SUPPORTED_TYPES,
-                        accept_multiple_files=True,
-                        help="PDF · DOCX · PPTX · XLSX · CSV · TXT · MD",
-                    )
+                        remove_names = st.multiselect(
+                            "삭제할 참고자료",
+                            options=existing_names,
+                            help="선택한 파일은 변경사항을 저장할 때 제거됩니다.",
+                        )
+                        add_files = st.file_uploader(
+                            "참고자료 추가",
+                            type=SUPPORTED_TYPES,
+                            accept_multiple_files=True,
+                            help="PDF · DOCX · PPTX · XLSX · CSV · TXT · MD",
+                        )
 
-                    st.caption("검색 고급 설정")
-                    e_top_k = st.slider(
-                        "RAG Top-K",
-                        min_value=1,
-                        max_value=8,
-                        value=int(agent.get("rag_top_k", 4)),
-                        help="질문과 가장 관련 있는 참고자료 조각을 몇 개까지 Agent에 전달할지 정합니다.",
-                    )
+                        st.caption("검색 고급 설정 · RAG Top-K")
+                        e_top_k = st.slider(
+                            "RAG Top-K",
+                            min_value=1,
+                            max_value=8,
+                            value=int(agent.get("rag_top_k", 4)),
+                            help="질문과 가장 관련 있는 참고자료 조각을 몇 개까지 Agent에 전달할지 정합니다.",
+                        )
 
-                save_agent = st.form_submit_button(
-                    "변경사항 저장",
-                    type="primary",
-                    use_container_width=True,
-                )
-
-            if save_agent:
-                if not e_name.strip() or not e_model.strip() or not e_system.strip():
-                    st.error("이름, Model ID, System Prompt는 비워둘 수 없습니다.")
-                else:
-                    remaining = [
-                        f for f in agent.get("rag_files", [])
-                        if f["name"] not in set(remove_names)
-                    ]
-                    merged = merge_file_items(remaining, uploaded_to_items(add_files))
-                    agent.update(
-                        {
-                            "name": e_name.strip(),
-                            "model": e_model.strip(),
-                            "system_prompt": e_system.strip(),
-                            "rag_enabled": bool(e_rag),
-                            "rag_top_k": int(e_top_k),
-                            "rag_files": merged,
-                        }
-                    )
-                    st.session_state.agents[editing_id] = agent
-                    st.session_state.rag_cache = {}
-                    st.success("변경사항을 저장했습니다.")
-                    st.rerun()
-
-            st.markdown("---")
-            st.markdown("**위험 영역**")
-            st.caption("Agent를 삭제하면 이 Agent가 포함된 Linear/Hierarchical Workflow 구성에서도 제거됩니다.")
-
-            if st.session_state.get("agent_delete_confirm_id") != editing_id:
-                if st.button(
-                    "Agent 삭제",
-                    type="secondary",
-                    use_container_width=True,
-                    key=f"request_delete_agent_{editing_id}",
-                ):
-                    st.session_state.agent_delete_confirm_id = editing_id
-                    st.rerun()
-            else:
-                st.warning(f"정말 '{agent['name']}' Agent를 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.")
-                delete_cancel_col, delete_confirm_col = st.columns(2)
-                with delete_cancel_col:
-                    if st.button(
-                        "취소",
-                        use_container_width=True,
-                        key=f"cancel_delete_agent_{editing_id}",
-                    ):
-                        st.session_state.agent_delete_confirm_id = None
-                        st.rerun()
-                with delete_confirm_col:
-                    if st.button(
-                        "삭제 확인",
+                    save_agent = st.form_submit_button(
+                        "변경사항 저장",
                         type="primary",
                         use_container_width=True,
-                        key=f"confirm_delete_agent_{editing_id}",
-                    ):
-                        st.session_state.workflow = [
-                            s for s in st.session_state.workflow if s["agent_id"] != editing_id
+                    )
+
+                if save_agent:
+                    if not e_name.strip() or not e_model.strip() or not e_system.strip():
+                        st.error("이름, Model ID, System Prompt는 비워둘 수 없습니다.")
+                    else:
+                        remaining = [
+                            f for f in agent.get("rag_files", [])
+                            if f["name"] not in set(remove_names)
                         ]
-                        st.session_state.hierarchy["workers"] = [
-                            w for w in st.session_state.hierarchy.get("workers", [])
-                            if w["agent_id"] != editing_id
-                        ]
-                        if st.session_state.hierarchy.get("manager_agent_id") == editing_id:
-                            st.session_state.hierarchy["manager_agent_id"] = None
-                        del st.session_state.agents[editing_id]
+                        merged = merge_file_items(remaining, uploaded_to_items(add_files))
+                        agent.update(
+                            {
+                                "name": e_name.strip(),
+                                "model": e_model.strip(),
+                                "system_prompt": e_system.strip(),
+                                "rag_enabled": bool(e_rag),
+                                "rag_top_k": int(e_top_k),
+                                "rag_files": merged,
+                            }
+                        )
+                        st.session_state.agents[editing_id] = agent
                         st.session_state.rag_cache = {}
-                        st.session_state.agent_editing_id = None
-                        st.session_state.agent_delete_confirm_id = None
-                        st.success("Agent를 삭제했습니다.")
+                        st.success("변경사항을 저장했습니다.")
                         st.rerun()
+
+                st.markdown("---")
+                with st.expander("위험 영역", expanded=False):
+                    st.caption("Agent를 삭제하면 이 Agent가 포함된 Linear/Hierarchical Workflow 구성에서도 제거됩니다.")
+
+                    if st.session_state.get("agent_delete_confirm_id") != editing_id:
+                        if st.button(
+                            "Agent 삭제",
+                            type="secondary",
+                            use_container_width=True,
+                            key=f"request_delete_agent_{editing_id}",
+                        ):
+                            st.session_state.agent_delete_confirm_id = editing_id
+                            st.rerun()
+                    else:
+                        st.warning(f"정말 '{agent['name']}' Agent를 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.")
+                        delete_cancel_col, delete_confirm_col = st.columns(2)
+                        with delete_cancel_col:
+                            if st.button(
+                                "취소",
+                                use_container_width=True,
+                                key=f"cancel_delete_agent_{editing_id}",
+                            ):
+                                st.session_state.agent_delete_confirm_id = None
+                                st.rerun()
+                        with delete_confirm_col:
+                            if st.button(
+                                "삭제 확인",
+                                type="primary",
+                                use_container_width=True,
+                                key=f"confirm_delete_agent_{editing_id}",
+                            ):
+                                agent_order = list(st.session_state.agents.keys())
+                                deleted_position = agent_order.index(editing_id)
+
+                                st.session_state.workflow = [
+                                    s for s in st.session_state.workflow if s["agent_id"] != editing_id
+                                ]
+                                st.session_state.hierarchy["workers"] = [
+                                    w for w in st.session_state.hierarchy.get("workers", [])
+                                    if w["agent_id"] != editing_id
+                                ]
+                                if st.session_state.hierarchy.get("manager_agent_id") == editing_id:
+                                    st.session_state.hierarchy["manager_agent_id"] = None
+                                del st.session_state.agents[editing_id]
+
+                                remaining_ids = list(st.session_state.agents.keys())
+                                if remaining_ids:
+                                    next_position = min(deleted_position, len(remaining_ids) - 1)
+                                    st.session_state.agent_editing_id = remaining_ids[next_position]
+                                else:
+                                    st.session_state.agent_editing_id = None
+
+                                st.session_state.rag_cache = {}
+                                st.session_state.agent_delete_confirm_id = None
+                                st.success("Agent를 삭제했습니다.")
+                                st.rerun()
+
+            else:
+                st.markdown(
+                    '''
+                    <div class="agent-empty">
+                        <div class="agent-empty-icon">🤖</div>
+                        <strong>Agent를 선택하세요</strong><br>
+                        <span style="opacity:.68">왼쪽 목록에서 Agent를 선택하거나 새 Agent를 만들어 주세요.</span>
+                    </div>
+                    ''',
+                    unsafe_allow_html=True,
+                )
+                if st.button(
+                    "＋ 첫 Agent 만들기" if not st.session_state.agents else "＋ 새 Agent 만들기",
+                    type="primary",
+                    use_container_width=True,
+                    key="empty_detail_create_agent",
+                ):
+                    st.session_state.agent_create_open = True
+                    st.session_state.agent_editing_id = None
+                    st.session_state.agent_delete_confirm_id = None
+                    st.rerun()
 
 with tabs[1]:
     st.subheader("Workflow Builder")
