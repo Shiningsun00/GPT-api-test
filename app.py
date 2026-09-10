@@ -165,6 +165,43 @@ st.markdown(
         .revision-current {
             font-weight: 650;
         }
+        .revision-jump-anchor {
+            height: 0;
+            scroll-margin-top: 1.25rem;
+        }
+        a.revision-jump-button {
+            position: fixed;
+            right: 2rem;
+            bottom: 5.8rem;
+            z-index: 1000;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: .35rem;
+            padding: .55rem .85rem;
+            border: 1px solid rgba(120,120,120,.28);
+            border-radius: 999px;
+            background: rgba(255,255,255,.96);
+            color: #31333f !important;
+            text-decoration: none !important;
+            font-size: .86rem;
+            font-weight: 650;
+            line-height: 1;
+            box-shadow: 0 4px 16px rgba(0,0,0,.10);
+            backdrop-filter: blur(8px);
+        }
+        a.revision-jump-button:hover {
+            border-color: rgba(120,120,120,.52);
+            box-shadow: 0 6px 20px rgba(0,0,0,.14);
+            transform: translateY(-1px);
+        }
+        @media (max-width: 768px) {
+            a.revision-jump-button {
+                right: 1rem;
+                bottom: 5.5rem;
+                padding: .52rem .72rem;
+            }
+        }
         .agent-library-kicker {
             font-size: .78rem;
             letter-spacing: .08em;
@@ -1154,6 +1191,12 @@ def render_revision_worklog(session: dict, registry: list[dict]):
 
     current_revision = len(revisions)
     session_id = str(session.get("session_id", "session"))
+    anchor_id = f"revision-worklog-{session_id}"
+
+    st.markdown(
+        f'<div id="{html.escape(anchor_id, quote=True)}" class="revision-jump-anchor"></div>',
+        unsafe_allow_html=True,
+    )
 
     with st.expander(f"🧭 작업 기록 · Revision v{current_revision}", expanded=False):
         st.markdown(
@@ -1234,6 +1277,14 @@ def render_hierarchical_feedback_panel(api_key: str):
 
     chat_history = session.setdefault("chat_history", [])
     render_revision_worklog(session, registry)
+
+    # Keep Revision History reachable even after a long Manager conversation.
+    worklog_anchor_id = f"revision-worklog-{session.get('session_id', 'session')}"
+    st.markdown(
+        f'<a class="revision-jump-button" href="#{html.escape(str(worklog_anchor_id), quote=True)}" '
+        'aria-label="버전 기록으로 이동" title="버전 기록으로 이동">↑ 버전 기록</a>',
+        unsafe_allow_html=True,
+    )
     st.divider()
 
     # Initial user request + first Manager answer.
