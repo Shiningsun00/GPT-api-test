@@ -6,6 +6,7 @@ on:
       - step1-core-engine
       - step2-sqlite-persistence
       - step3-langgraph-state-machine
+      - step4-career-workflow-migration
   pull_request:
     branches:
       - main
@@ -30,3 +31,5 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Run STEP 3 smoke test
         run: python scripts/manual_smoke_test.py --auto
+      - name: Run STEP 4 career smoke test
+        run: python scripts/manual_career_smoke_test.py
