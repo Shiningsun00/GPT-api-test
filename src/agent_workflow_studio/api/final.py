@@ -3,14 +3,23 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fastapi import File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from agent_workflow_studio.core.models import ExecutionFile, RunStatus
+from agent_workflow_studio.core.workflow import new_initial_run
 from agent_workflow_studio.migration import LegacyWorkspaceError, LegacyWorkspaceImporter
 from agent_workflow_studio.runtime.maintenance import BackupManager, cleanup_local_files
 
-from .app import BackendContext, create_app as create_core_app
+from .app import (
+    BackendContext,
+    _graph_result_payload,
+    _runtime_for_workflow,
+    _workflow_for_session,
+    create_app as create_core_app,
+)
 
 
 class CleanupPayload(BaseModel):
@@ -29,6 +38,61 @@ def create_app(context: BackendContext | None = None):
     app = create_core_app(ctx)
     app.title = "Agent Workflow Studio API"
     app.version = "2.0.0"
+
+    @app.post("/runs/with-files", status_code=201)
+    async def start_run_with_files(
+        session_id: str = Form(...),
+        user_request: str = Form(...),
+        policy: str = Form("career_cover_letter"),
+        run_id: str | None = Form(None),
+        target_ids: list[str] = Form(default=[]),
+        files: list[UploadFile] = File(default=[]),
+    ) -> dict[str, Any]:
+        if policy != "career_cover_letter":
+            raise HTTPException(status_code=422, detail=f"unsupported workflow policy: {policy}")
+        session, workflow = _workflow_for_session(ctx, session_id)
+        if ctx.persistence.runs.list_active():
+            raise HTTPException(status_code=409, detail="another active run already exists")
+        run = new_initial_run(session, run_id=run_id)
+        ctx.persistence.runs.save(run)
+        stored = []
+        execution_files: list[ExecutionFile] = []
+        try:
+            for upload in files:
+                data = await upload.read()
+                item = ctx.file_store.store_run_file(run.id, upload.filename or "attachment", data)
+                stored.append(item)
+                execution_file = ExecutionFile(
+                    id=str(uuid4()),
+                    run_id=run.id,
+                    filename=upload.filename or "attachment",
+                    sha256=item.sha256,
+                    size=item.size,
+                    storage_ref=item.storage_ref,
+                    target_ids=tuple(dict.fromkeys(value for value in target_ids if value)),
+                )
+                ctx.persistence.run_files.save(execution_file)
+                execution_files.append(execution_file)
+            runtime = _runtime_for_workflow(ctx, workflow)
+            outcome = runtime.start_initial(run, user_request=user_request)
+        except Exception:
+            latest = ctx.persistence.runs.get(run.id)
+            if latest is not None and latest.status == RunStatus.CREATED:
+                ctx.persistence.runs.delete(run.id)
+                for item in stored:
+                    if item.created:
+                        ctx.file_store.delete(item.storage_ref)
+            raise
+        payload = _graph_result_payload(outcome)
+        payload["execution_files"] = [item.to_dict() for item in execution_files]
+        return payload
+
+    @app.get("/sessions/{session_id}/files")
+    def list_session_files(session_id: str) -> list[dict[str, Any]]:
+        if ctx.persistence.sessions.get(session_id) is None:
+            raise HTTPException(status_code=404, detail=f"session not found: {session_id}")
+        run_ids = {item.id for item in ctx.persistence.runs.list(session_id=session_id)}
+        return [item.to_dict() for item in ctx.persistence.run_files.list() if item.run_id in run_ids]
 
     @app.get("/maintenance/status")
     def maintenance_status() -> dict[str, Any]:
