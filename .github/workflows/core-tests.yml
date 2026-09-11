@@ -12,6 +12,7 @@ on:
       - step7-discord-integration
       - step8-notion-interaction
       - step9-desktop-qa
+      - uat-generic-runtime-recovery
   pull_request:
     branches:
       - main
@@ -36,6 +37,8 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Run STEP 3 smoke test
         run: python scripts/manual_smoke_test.py --auto
+      - name: Run R2 generic runtime smoke test
+        run: python scripts/manual_generic_runtime_smoke_test.py
       - name: Run STEP 4 career smoke test
         run: python scripts/manual_career_smoke_test.py
       - name: Run STEP 5 API smoke test
