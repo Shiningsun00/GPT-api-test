@@ -24,6 +24,8 @@ export DISCORD_ALLOWED_CHANNEL_IDS="123456789"
 
 `DISCORD_BOT_TOKEN`과 `OPENAI_API_KEY`는 환경변수로만 전달하며 DB/Git에 저장하지 않습니다.
 
+보안을 위해 기본값은 **allowlist 필수**입니다. `DISCORD_ALLOWED_GUILD_IDS`, `DISCORD_ALLOWED_USER_IDS`, `DISCORD_ALLOWED_CHANNEL_IDS` 중 하나 이상을 설정해야 Bot이 시작됩니다. 개발용으로만 제한 없이 실행하려면 의도를 명시적으로 드러내기 위해 `DISCORD_ALLOW_UNLISTED=true`를 별도로 설정해야 합니다.
+
 ## 3. Start services
 
 Terminal 1:
