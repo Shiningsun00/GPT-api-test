@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent_workflow_studio.core.models import Agent
+from agent_workflow_studio.core.models import Agent, Workflow, WorkflowSession
 from agent_workflow_studio.integrations.notion import (
     NotionClient,
     NotionConfig,
@@ -41,9 +41,8 @@ def text_property(kind: str, text: str):
 
 
 class FakeNotion:
-    def __init__(self, *, run_status: str = "completed"):
+    def __init__(self):
         self.config = SimpleNamespace(token="notion-secret")
-        self.run_status = run_status
         self.append_calls = []
         self.update_calls = []
         self.query_calls = 0
@@ -107,7 +106,15 @@ class FakeNotion:
 
 
 class FakeApi:
-    def __init__(self, *, status="completed"):
+    """Fake FastAPI boundary that also persists Sessions into the shared domain DB.
+
+    External-thread links intentionally retain the production foreign-key rule, so
+    tests must model the API's durable Session write before the Notion adapter binds
+    a page to that Session.
+    """
+
+    def __init__(self, persistence: SQLitePersistence, *, status="completed"):
+        self.persistence = persistence
         self.status = status
         self.sessions = {}
         self.runs = {}
@@ -118,6 +125,10 @@ class FakeApi:
     async def create_session(self, *, workflow_id: str, title: str = ""):
         self.create_session_count += 1
         session_id = f"session-{self.create_session_count}"
+        if self.persistence.workflows.get(workflow_id) is None:
+            self.persistence.workflows.save(Workflow(id=workflow_id, name="Notion Test Workflow"))
+        domain_session = WorkflowSession(id=session_id, workflow_id=workflow_id, title=title)
+        self.persistence.sessions.save(domain_session)
         self.sessions[session_id] = {"id": session_id, "workflow_id": workflow_id, "title": title}
         self.runs[session_id] = []
         self.revisions[session_id] = []
@@ -187,6 +198,24 @@ class NotionInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"/data_sources/{DATA_SOURCE_ID}/query", captured["url"])
         self.assertEqual(captured["body"]["filter"]["status"]["equals"], "Ready")
 
+    def test_data_source_iteration_follows_pagination_cursor(self):
+        captured_bodies = []
+        responses = [
+            {"results": [{"id": "page-1"}], "has_more": True, "next_cursor": "cursor-2"},
+            {"results": [{"id": "page-2"}], "has_more": False, "next_cursor": None},
+        ]
+
+        def fake_urlopen(request, timeout):
+            captured_bodies.append(json.loads(request.data.decode("utf-8")))
+            return FakeHTTPResponse(responses.pop(0))
+
+        client = NotionClient(NotionConfig(token="secret"), urlopen=fake_urlopen)
+        pages = list(client.iter_data_source(DATA_SOURCE_ID, page_size=25))
+        self.assertEqual([item["id"] for item in pages], ["page-1", "page-2"])
+        self.assertNotIn("start_cursor", captured_bodies[0])
+        self.assertEqual(captured_bodies[1]["start_cursor"], "cursor-2")
+        self.assertEqual(captured_bodies[1]["page_size"], 25)
+
     def test_read_only_reference_context(self):
         notion = FakeNotion()
         notion.blocks = [
@@ -221,9 +250,9 @@ class NotionInteractionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ready_task_starts_once_maps_and_writes_final_result(self):
         notion = FakeNotion()
-        api = FakeApi(status="completed")
         with tempfile.TemporaryDirectory() as tmp:
             persistence = SQLitePersistence(str(Path(tmp) / "domain.sqlite"))
+            api = FakeApi(persistence, status="completed")
             links = NotionSessionLinkStore(persistence)
             adapter = NotionInboxAdapter(
                 notion,
@@ -251,10 +280,10 @@ class NotionInteractionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_existing_mapping_prevents_duplicate_run_and_marker_prevents_duplicate_append(self):
         notion = FakeNotion()
-        api = FakeApi(status="completed")
         with tempfile.TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "domain.sqlite")
             persistence = SQLitePersistence(db_path)
+            api = FakeApi(persistence, status="completed")
             links = NotionSessionLinkStore(persistence)
             session = await api.create_session(workflow_id="workflow-1", title="LG application")
             await api.start_run(session_id=session["id"], user_request="write my cover letter")
@@ -273,9 +302,9 @@ class NotionInteractionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_waiting_run_is_observed_without_done_write(self):
         notion = FakeNotion()
-        api = FakeApi(status="waiting_for_user")
         with tempfile.TemporaryDirectory() as tmp:
             persistence = SQLitePersistence(str(Path(tmp) / "domain.sqlite"))
+            api = FakeApi(persistence, status="waiting_for_user")
             adapter = NotionInboxAdapter(
                 notion,
                 api,
