@@ -89,7 +89,7 @@ export function workflowPayloadFromForm(form) {
     id: form.id || undefined,
     name: form.name.trim(),
     mode: form.mode,
-    include_original_prompt: true,
+    include_original_prompt: form.include_original_prompt !== false,
     steps: [],
     hierarchy: null,
   }
@@ -102,9 +102,9 @@ export function workflowPayloadFromForm(form) {
   } else {
     base.hierarchy = {
       manager_agent_id: form.manager_agent_id,
-      manager_planning_prompt: '',
-      manager_synthesis_prompt: '',
-      manager_routing_prompt: '',
+      manager_planning_prompt: form.manager_planning_prompt || '',
+      manager_synthesis_prompt: form.manager_synthesis_prompt || '',
+      manager_routing_prompt: form.manager_routing_prompt || '',
       workers: form.rows.filter((row) => row.agent_id).map((row, index) => ({
         worker_id: row.worker_id || `worker-${index + 1}`,
         agent_id: row.agent_id,
