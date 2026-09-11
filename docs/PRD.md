@@ -1,19 +1,21 @@
 # Agent Workflow Studio 2.0 — Product Requirements Document (PRD)
 
-> 문서 상태: **DRAFT — 사용자 결정 필요**  
-> PRD 버전: **Draft v0.2**  
+> 문서 상태: **APPROVED v1.0**  
+> PRD 버전: **v1.0**  
+> 승인일: **2026-09-11**  
 > 기준 문서: `docs/migration_spec.md`  
 > 기준 제품: 기존 Streamlit 기반 Agent Workflow Studio  
 > 목표 제품: **Local-first 범용 Multi-Agent Workflow Studio**  
 > 작성 목적: STEP 1 이후 구현 중 제품 방향이 흔들리지 않도록 제품 목표, 사용자 경험, 기능 범위, 안정성 기준, 보안 원칙과 완료 조건을 고정한다.
 
-## Draft v0.2 변경사항
+## v1.0 확정사항
 
-- Manager가 결과를 제공한 뒤에도 동일 Workflow 대화를 계속할 수 있는 **사용자 주도 HITL Follow-up**을 MUST 요구사항으로 추가한다.
+- Manager가 결과를 제공한 뒤에도 동일 Workflow 대화를 계속할 수 있는 **사용자 주도 HITL Follow-up**을 MUST 요구사항으로 확정한다.
 - Follow-up 명령과 함께 파일을 첨부할 수 있도록 한다.
 - Agent가 질문해서 멈추는 `Interrupt → Resume`와 사용자가 결과를 본 뒤 추가 지시를 주는 `Post-result Follow-up`을 구분한다.
 - 이미 완료된 실행을 다시 RUNNING으로 되돌리지 않도록 `Workflow Session/Thread`와 개별 `Run`의 개념을 구분한다.
 - 초기 Run뿐 아니라 Follow-up 메시지에도 Run-only 파일을 연결할 수 있도록 데이터 요구사항을 확장한다.
+- D-01~D-10 Product Decision을 모두 승인한다.
 
 ---
 
@@ -1082,149 +1084,111 @@ Merge
 
 ---
 
-# 18. 사용자 확정 필요 — Product Decisions
+# 18. Approved Product Decisions
 
-아래 항목은 구현 방식에 큰 영향을 주므로 **STEP 1 본격 구현 전에 확정하는 것을 권장한다.**
+## D-01 Primary Deployment Model — CONFIRMED
 
-## D-01 Primary Deployment Model
+**결정:** `Single-user / Local-first`
 
-**질문:** 2.0의 첫 목표를 개인 PC 1대에서 사용하는 Single-user Local App으로 고정할 것인가?
-
-**추천안:** `YES — Single-user / Local-first`
-
-상태: **NEEDS USER CONFIRMATION**
+Agent Workflow Studio 2.0의 첫 목표는 개인 PC 1대에서 사용하는 로컬 앱이다. 초기 범위에서 다중 사용자 인증, 중앙 DB와 클라우드 운영 복잡성은 제외한다.
 
 ---
 
-## D-02 Provider Scope
+## D-02 Provider Scope — CONFIRMED
 
-**질문:** 초기 2.0에서 OpenAI API만 지원할 것인가, Anthropic/Gemini 등 Multi-provider까지 처음부터 지원할 것인가?
+**결정:** `OpenAI only in 2.0`, 단 Core interface는 provider 교체가 가능하도록 추상화한다.
 
-**추천안:** `OpenAI only in 2.0`, 단 Core interface는 provider 교체가 가능하도록 추상화.
-
-상태: **NEEDS USER CONFIRMATION**
+초기 구현과 회귀 테스트는 OpenAI SDK를 기준으로 한다. Anthropic/Gemini 등은 후속 확장 시 adapter를 추가할 수 있도록 경계를 유지한다.
 
 ---
 
-## D-03 Workflow UI Level
+## D-03 Workflow UI Level — CONFIRMED
 
-**질문:** Local UI에서 처음부터 Node drag & drop 방식의 Visual Graph Editor가 필수인가?
+**결정:** `STEP 6은 안정적인 Form/List Editor 우선, Visual Node Editor는 후속 추가`
 
-```text
-A. STEP 6부터 Visual Node Editor 포함
-B. STEP 6은 안정적인 Form/List Editor, Visual Graph는 후속 추가
-```
-
-**추천안:** `B`
-
-상태: **NEEDS USER CONFIRMATION**
+Core Engine과 저장 구조의 안정성을 먼저 확보하고, drag & drop Visual Graph Editor는 후속 UI 개선으로 다룬다.
 
 ---
 
-## D-04 Concurrent Runs
+## D-04 Concurrent Runs — CONFIRMED
 
-**질문:** 초기 버전에서 여러 Workflow를 동시에 실행해야 하는가?
+**결정:** `초기 2.0은 한 번에 1개 Active Run`
 
-```text
-A. 여러 Run 동시 실행
-B. 한 번에 1개 active Run + 나머지는 queue/paused
-```
-
-**추천안:** `B` for initial 2.0
-
-상태: **NEEDS USER CONFIRMATION**
+다른 Run은 queue/paused 상태로 대기할 수 있다. 내부 Entity와 API는 추후 concurrent execution 확장이 가능하도록 설계한다.
 
 ---
 
-## D-05 Restart Behavior
+## D-05 Restart Behavior — CONFIRMED
 
-**질문:** 프로그램을 재실행했을 때 중단 Run을 자동으로 계속 실행할까, 사용자가 Resume 버튼을 눌러야 할까?
+**결정:** `Manual Resume`
 
-**추천안:** `Manual Resume`
-
-상태: **NEEDS USER CONFIRMATION**
+프로그램 재실행 시 중단 Run을 자동 실행하지 않는다. 사용자가 현재 상태와 마지막 Checkpoint를 확인한 뒤 Resume한다. 이를 통해 예기치 않은 API 비용과 외부 write를 방지한다.
 
 ---
 
-## D-06 Legacy Workspace Compatibility
+## D-06 Legacy Workspace Compatibility — CONFIRMED
 
-**질문:** 기존 `agent_workspace.zip`은 2.0으로 import만 지원하면 되는가, 2.0에서 다시 구버전 ZIP으로 export해야 하는가?
+**결정:** `agent_workspace.zip Import only`
 
-**추천안:** `Import only`
-
-상태: **NEEDS USER CONFIRMATION**
+Workspace v1–v4는 2.0으로 import할 수 있어야 한다. 2.0의 DB/Graph 상태를 구버전 Workspace ZIP으로 다시 export하는 backward export는 지원하지 않는다.
 
 ---
 
-## D-07 External Write Safety
+## D-07 External Write Safety — CONFIRMED
 
-**질문:** Notion에 결과를 쓸 때 Agent가 자동으로 기존 내용을 수정하도록 허용할 것인가?
-
-**추천안:**
+**결정:**
 
 ```text
 기본 = 생성/append 또는 지정 영역 update
 삭제/대규모 overwrite = 사용자 명시 승인 필요
 ```
 
-Discord 역시 Workflow를 실행할 수 있는 서버/사용자를 allowlist로 제한한다.
-
-상태: **NEEDS USER CONFIRMATION**
+Discord Workflow 실행은 허용된 사용자/서버를 allowlist로 제한한다.
 
 ---
 
-## D-08 Data Retention
+## D-08 Data Retention — CONFIRMED
 
-**질문:** Session, Run, Artifact, Revision, 메시지와 첨부파일을 기본적으로 얼마나 보관할 것인가?
+**결정:** `사용자가 삭제하기 전까지 로컬에 보존`
 
-**추천안:** `사용자가 삭제하기 전까지 로컬에 보존`
-
-캐시/임시 추출물은 cleanup 가능하지만 Artifact/Revision과 Follow-up Attachment 원본은 사용자가 삭제하기 전 자동 삭제하지 않는다.
-
-상태: **NEEDS USER CONFIRMATION**
+Session, Run, Artifact, Revision, Message와 Follow-up Attachment 원본은 자동 삭제하지 않는다. 재생성 가능한 cache와 임시 추출물은 cleanup 대상으로 둘 수 있다.
 
 ---
 
-## D-09 Discord Role
+## D-09 Discord Role — CONFIRMED
 
-**질문:** Discord를 어느 수준의 UI로 사용할 것인가?
+**결정:** Discord는 다음 Interaction을 지원한다.
 
 ```text
-A. 새 Workflow 시작 + 질문 답변 + 상태 조회 + 결과 수신 + Follow-up
-B. Human Input/Resume 용도만
+새 Workflow 시작
+상태 조회
+Agent 질문 답변
+Active Run Resume
+Manager 결과 이후 Follow-up
+결과 수신
 ```
 
-**추천안:** `A`
-
-Agent/Workflow 설정 편집은 Local UI에서만 수행한다.
-
-상태: **NEEDS USER CONFIRMATION**
+가능하면 Discord 첨부파일도 동일한 Follow-up Attachment 모델로 처리한다. Agent와 Workflow 설정 편집은 Local UI에서만 수행한다.
 
 ---
 
-## D-10 Notion Role
+## D-10 Notion Role — CONFIRMED
 
-**질문:** Notion을 어느 수준으로 사용할 것인가?
+**결정:** Notion은 다음 세 역할을 모두 지원한다.
 
 ```text
-1. Agent 참고자료 source
+1. Agent 참고자료 Source
 2. Ready 상태 기반 Workflow Inbox
-3. Final output 저장
+3. Final Output 저장
 ```
 
-**추천안:** `1 + 2 + 3`
-
-초기에는 polling, 실시간 webhook은 후속 범위.
-
-상태: **NEEDS USER CONFIRMATION**
+초기 자동화는 polling 방식으로 구현하고 실시간 webhook은 후속 확장으로 둔다.
 
 ---
 
 # 19. Confirmed Product Decision — Follow-up Attachment
 
-## C-01 Manager Post-result HITL + File Attachment
-
-사용자가 명시적으로 요청하여 다음 사항은 **CONFIRMED**로 본다.
+## C-01 Manager Post-result HITL + File Attachment — CONFIRMED
 
 ```text
 Manager가 결과를 제공한 후에도 사용자는 같은 Workflow Session에서 추가 명령을 보낼 수 있다.
@@ -1251,37 +1215,37 @@ User Follow-up + Attachment
 | ID | Decision | Status |
 |---|---|---|
 | C-01 | Manager 결과 이후 Follow-up + 파일 첨부 | **Confirmed** |
-| D-01 | Primary Deployment Model | Pending |
-| D-02 | Provider Scope | Pending |
-| D-03 | Workflow UI Level | Pending |
-| D-04 | Concurrent Runs | Pending |
-| D-05 | Restart Behavior | Pending |
-| D-06 | Legacy Workspace Compatibility | Pending |
-| D-07 | External Write Safety | Pending |
-| D-08 | Data Retention | Pending |
-| D-09 | Discord Role | Pending |
-| D-10 | Notion Role | Pending |
+| D-01 | Single-user / Local-first | **Confirmed** |
+| D-02 | OpenAI only + provider abstraction | **Confirmed** |
+| D-03 | Form/List UI first, Visual Editor later | **Confirmed** |
+| D-04 | One Active Run initially | **Confirmed** |
+| D-05 | Manual Resume after restart | **Confirmed** |
+| D-06 | Legacy Workspace Import only | **Confirmed** |
+| D-07 | Safe Notion write + destructive-action approval | **Confirmed** |
+| D-08 | Retain until user deletion | **Confirmed** |
+| D-09 | Full Discord interaction surface | **Confirmed** |
+| D-10 | Notion source + inbox + output | **Confirmed** |
 
 ---
 
 # 21. PRD Approval Gate
 
-STEP 1 구현 전 다음 조건을 만족한다.
+STEP 1 구현 전 Approval Gate:
 
 ```text
-[ ] D-01 ~ D-10 사용자 결정 완료
+[x] D-01 ~ D-10 사용자 결정 완료
 [x] C-01 Post-result HITL + File Attachment 요구사항 확정
-[ ] Product Vision 승인
-[ ] MUST / SHOULD 범위 승인
-[ ] Out of Scope 승인
-[ ] Definition of Done 승인
+[x] Product Vision 승인
+[x] MUST / SHOULD 범위 승인
+[x] Out of Scope 승인
+[x] Definition of Done 승인
 ```
 
-모두 확정되면 문서 상태를:
+## Approval Result
 
 ```text
-DRAFT
-→ APPROVED v1.0
+PRD STATUS = APPROVED v1.0
+NEXT = STEP 1 — Pure Python Core Engine 분리
 ```
 
-으로 변경하고 STEP 1을 시작한다.
+이 문서는 STEP 1 이후 제품 구현의 기준 문서다. 새로운 제품 방향이나 범위 변경이 발생하면 구현에 선행하여 Decision Log와 PRD version을 갱신한다.
