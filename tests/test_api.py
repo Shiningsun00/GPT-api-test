@@ -12,8 +12,11 @@ from fastapi.testclient import TestClient
 
 from agent_workflow_studio.api import BackendContext, create_app
 from agent_workflow_studio.core.execution import ModelResponse
-from agent_workflow_studio.graph import SQLiteGraphCheckpointer
+from agent_workflow_studio.core.models import RunStatus
+from agent_workflow_studio.core.workflow import new_initial_run
+from agent_workflow_studio.graph import SQLiteGraphCheckpointer, UserInputRequest
 from agent_workflow_studio.persistence import LocalFileStore, SQLitePersistence
+from agent_workflow_studio.policies.career_runtime import CareerWorkflowRuntime
 
 
 class FakeProvider:
@@ -144,6 +147,42 @@ class FastAPITests(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertEqual(len(messages[0]["attachment_ids"]), 1)
         self.assertTrue(any("verified API evidence" in call["input_text"] for call in self.provider.calls))
+
+    def test_hitl_resume_endpoint_keeps_same_run_and_thread(self) -> None:
+        workflow_id, session_id = self._seed_career()
+        workflow = self.persistence.workflows.get(workflow_id)
+        session = self.persistence.sessions.get(session_id)
+        self.assertIsNotNone(workflow)
+        self.assertIsNotNone(session)
+        run = new_initial_run(session, run_id="run-hitl")
+        self.persistence.runs.save(run)
+
+        def hook(state, spec):
+            if spec.key == "w4_draft" and spec.key not in state.get("human_answers", {}):
+                return UserInputRequest(question="Confirm writing direction")
+            return None
+
+        runtime = CareerWorkflowRuntime(
+            workflow=workflow,
+            persistence=self.persistence,
+            checkpointer=self.checkpointer,
+            provider=self.provider,
+            file_store=self.file_store,
+            hitl_hook=hook,
+        )
+        waiting = runtime.start_initial(run, user_request="Need confirmation before draft")
+        self.assertEqual(waiting.graph.status, RunStatus.WAITING_FOR_USER)
+
+        resumed = self.client.post(
+            "/runs/run-hitl/resume",
+            json={"mode": "user", "answer": "Proceed"},
+        )
+        self.assertEqual(resumed.status_code, 200, resumed.text)
+        body = resumed.json()
+        self.assertEqual(body["status"], "COMPLETED")
+        self.assertEqual(body["run_id"], "run-hitl")
+        self.assertEqual(body["thread_id"], "run-hitl")
+        self.assertEqual(body["revision"]["version"], 1)
 
     def test_run_errors_are_normalized(self) -> None:
         missing = self.client.get("/runs/does-not-exist")
