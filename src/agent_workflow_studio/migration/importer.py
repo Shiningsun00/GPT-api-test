@@ -157,19 +157,20 @@ class LegacyWorkspaceImporter:
             if safe in payloads:
                 return safe, payloads[safe]
         filename = PurePosixPath(str(metadata.get("name") or metadata.get("filename") or "")).name
-        candidates: list[tuple[str, bytes]] = []
-        for key in agent_keys:
+        candidates: dict[str, bytes] = {}
+        for key in dict.fromkeys(agent_keys):
             prefix = f"rag_files/{key}/"
             for name, data in payloads.items():
                 if name.startswith(prefix) and (not filename or PurePosixPath(name).name == filename):
-                    candidates.append((name, data))
+                    candidates[name] = data
+        candidate_items = list(candidates.items())
         expected_hash = str(metadata.get("sha256") or "").strip().lower()
         if expected_hash:
-            hashed = [item for item in candidates if hashlib.sha256(item[1]).hexdigest() == expected_hash]
+            hashed = [item for item in candidate_items if hashlib.sha256(item[1]).hexdigest() == expected_hash]
             if len(hashed) == 1:
                 return hashed[0]
-        if len(candidates) == 1:
-            return candidates[0]
+        if len(candidate_items) == 1:
+            return candidate_items[0]
         return None
 
     def import_bytes(self, data: bytes, *, conflict_policy: str = "fail") -> LegacyWorkspaceImportReport:
@@ -194,7 +195,7 @@ class LegacyWorkspaceImporter:
                 continue
             rag_metadata = [dict(item) for item in (agent_data.get("rag_files") or []) if isinstance(item, Mapping)]
             known_names = {str(item.get("name") or item.get("filename") or "") for item in rag_metadata}
-            for agent_key in (key, agent_id):
+            for agent_key in dict.fromkeys((key, agent_id)):
                 prefix = f"rag_files/{agent_key}/"
                 for path, payload in payloads.items():
                     if path.startswith(prefix):
