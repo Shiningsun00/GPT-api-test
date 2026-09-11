@@ -9,6 +9,7 @@ on:
       - step4-career-workflow-migration
       - step5-fastapi-backend
       - step6-react-local-ui
+      - step7-discord-integration
   pull_request:
     branches:
       - main
@@ -37,6 +38,8 @@ jobs:
         run: python scripts/manual_career_smoke_test.py
       - name: Run STEP 5 API smoke test
         run: python scripts/manual_api_smoke_test.py
+      - name: Run STEP 7 Discord adapter smoke test
+        run: python scripts/manual_discord_smoke_test.py
 
   local-ui:
     runs-on: ubuntu-latest
