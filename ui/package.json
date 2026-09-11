@@ -1,13 +1,16 @@
 {
   "name": "agent-workflow-studio-ui",
   "private": true,
-  "version": "2.0.0-step6",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "vitest run"
+    "test": "vitest run",
+    "tauri": "tauri",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
@@ -16,6 +19,7 @@
     "react-dom": "latest"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
     "vitest": "latest"
   }
 }

@@ -1,0 +1,13 @@
+[package]
+name = "agent-workflow-studio"
+version = "2.0.0"
+description = "Local-first multi-agent workflow studio"
+authors = ["Shiningsun00"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
