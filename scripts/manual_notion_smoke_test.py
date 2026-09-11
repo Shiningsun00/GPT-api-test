@@ -9,6 +9,7 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from agent_workflow_studio.core.models import Workflow, WorkflowSession
 from agent_workflow_studio.integrations.notion_workflow import (
     NotionInboxAdapter,
     NotionInboxConfig,
@@ -78,12 +79,16 @@ class FakeNotion:
 
 
 class FakeApi:
-    def __init__(self):
+    def __init__(self, persistence: SQLitePersistence):
+        self.persistence = persistence
         self.start_count = 0
         self.sessions = {}
 
     async def create_session(self, *, workflow_id: str, title: str = ""):
+        if self.persistence.workflows.get(workflow_id) is None:
+            self.persistence.workflows.save(Workflow(id=workflow_id, name="Notion Smoke Workflow"))
         session = {"id": "session-1", "workflow_id": workflow_id, "title": title}
+        self.persistence.sessions.save(WorkflowSession(id=session["id"], workflow_id=workflow_id, title=title))
         self.sessions[session["id"]] = {"runs": [], "revisions": []}
         return session
 
@@ -114,7 +119,7 @@ async def run() -> None:
         db_path = str(Path(tmp) / "domain.sqlite")
         persistence = SQLitePersistence(db_path)
         notion = FakeNotion()
-        api = FakeApi()
+        api = FakeApi(persistence)
         links = NotionSessionLinkStore(persistence)
         adapter = NotionInboxAdapter(notion, api, links, NotionInboxConfig(data_source_id=DATA_SOURCE_ID))
 
