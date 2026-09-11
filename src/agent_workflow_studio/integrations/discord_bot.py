@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import os
 from pathlib import Path
-from typing import Iterable
 
 import discord
 from discord import app_commands
@@ -39,6 +38,10 @@ def allowlist_from_env() -> DiscordAllowlist:
         user_ids=_parse_id_set(os.getenv("DISCORD_ALLOWED_USER_IDS")),
         channel_ids=_parse_id_set(os.getenv("DISCORD_ALLOWED_CHANNEL_IDS")),
     )
+
+
+def _explicit_unlisted_access_enabled() -> bool:
+    return os.getenv("DISCORD_ALLOW_UNLISTED", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def discord_context(interaction: discord.Interaction) -> DiscordContext:
@@ -168,12 +171,17 @@ def build_bot_from_env() -> tuple[AgentWorkflowDiscordBot, DiscordSessionLinkSto
     token = os.getenv("DISCORD_BOT_TOKEN")
     if not token:
         raise RuntimeError("DISCORD_BOT_TOKEN is required")
+    allowlist = allowlist_from_env()
+    if not (allowlist.guild_ids or allowlist.user_ids or allowlist.channel_ids) and not _explicit_unlisted_access_enabled():
+        raise RuntimeError(
+            "configure at least one DISCORD_ALLOWED_* allowlist or explicitly set DISCORD_ALLOW_UNLISTED=true"
+        )
     api_base = os.getenv("AWS2_API_BASE_URL", "http://127.0.0.1:8000")
     data_root = Path(os.getenv("AWS2_DATA_DIR", "data")).expanduser().resolve()
     data_root.mkdir(parents=True, exist_ok=True)
     links = DiscordSessionLinkStore.from_sqlite(str(data_root / "domain.sqlite"))
     api = DiscordWorkflowApiClient(api_base)
-    controller = DiscordController(api, links, allowlist=allowlist_from_env())
+    controller = DiscordController(api, links, allowlist=allowlist)
     return AgentWorkflowDiscordBot(controller), links
 
 
