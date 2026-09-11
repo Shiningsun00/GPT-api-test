@@ -41,10 +41,7 @@ def build_fixture(root: Path):
     provider = FakeProvider()
     agents = {
         "M": Agent(id="manager", name="Manager", model="fake", system_prompt="MANAGER prompt"),
-        **{
-            f"W{i}": Agent(id=f"agent-w{i}", name=f"W{i} worker", model="fake", system_prompt=f"W{i} prompt")
-            for i in range(1, 7)
-        },
+        **{f"W{i}": Agent(id=f"agent-w{i}", name=f"W{i} worker", model="fake", system_prompt=f"W{i} prompt") for i in range(1, 7)},
     }
     for agent in agents.values():
         persistence.agents.save(agent)
@@ -74,13 +71,7 @@ class CareerWorkflowTests(unittest.TestCase):
             persistence.workflows.save(workflow)
             checkpointer = SQLiteGraphCheckpointer(root / "graph.sqlite")
             with self.assertRaises(CareerRegistryError):
-                CareerWorkflowRuntime(
-                    workflow=workflow,
-                    persistence=persistence,
-                    checkpointer=checkpointer,
-                    provider=provider,
-                    file_store=file_store,
-                )
+                CareerWorkflowRuntime(workflow=workflow, persistence=persistence, checkpointer=checkpointer, provider=provider, file_store=file_store)
             checkpointer.close()
             persistence.close()
 
@@ -89,13 +80,7 @@ class CareerWorkflowTests(unittest.TestCase):
             root = Path(tmp)
             persistence, file_store, provider, workflow, session, run = build_fixture(root)
             checkpointer = SQLiteGraphCheckpointer(root / "graph.sqlite")
-            runtime = CareerWorkflowRuntime(
-                workflow=workflow,
-                persistence=persistence,
-                checkpointer=checkpointer,
-                provider=provider,
-                file_store=file_store,
-            )
+            runtime = CareerWorkflowRuntime(workflow=workflow, persistence=persistence, checkpointer=checkpointer, provider=provider, file_store=file_store)
             outcome = runtime.start_initial(run, user_request="Write an application essay from verified evidence.")
             self.assertEqual(outcome.graph.status, RunStatus.COMPLETED)
             self.assertEqual(tuple(outcome.graph.state["node_history"]), CAREER_STAGE_ORDER)
@@ -104,15 +89,9 @@ class CareerWorkflowTests(unittest.TestCase):
             artifacts = persistence.artifacts.list(run_id=run.id)
             self.assertEqual(len(artifacts), 8)
             by_stage = {item.metadata["stage"]: item for item in artifacts}
-            self.assertEqual(
-                set(by_stage["w3_candidates"].dependencies),
-                {by_stage["w1_intake"].id, by_stage["w2_analysis"].id},
-            )
+            self.assertEqual(set(by_stage["w3_candidates"].dependencies), {by_stage["w1_intake"].id, by_stage["w2_analysis"].id})
             self.assertEqual(by_stage["w6_selection_review"].dependencies, (by_stage["w3_candidates"].id,))
-            self.assertEqual(
-                set(by_stage["w3_strategy"].dependencies),
-                {by_stage["w3_candidates"].id, by_stage["w6_selection_review"].id},
-            )
+            self.assertEqual(set(by_stage["w3_strategy"].dependencies), {by_stage["w3_candidates"].id, by_stage["w6_selection_review"].id})
             self.assertEqual(by_stage["w4_draft"].dependencies, (by_stage["w3_strategy"].id,))
             self.assertEqual(by_stage["w5_fact_review"].dependencies, (by_stage["w4_draft"].id,))
             self.assertEqual(by_stage["w6_reader_review"].dependencies, (by_stage["w4_draft"].id,))
@@ -127,13 +106,7 @@ class CareerWorkflowTests(unittest.TestCase):
             root = Path(tmp)
             persistence, file_store, provider, workflow, session, run = build_fixture(root)
             checkpointer = SQLiteGraphCheckpointer(root / "graph.sqlite")
-            runtime = CareerWorkflowRuntime(
-                workflow=workflow,
-                persistence=persistence,
-                checkpointer=checkpointer,
-                provider=provider,
-                file_store=file_store,
-            )
+            runtime = CareerWorkflowRuntime(workflow=workflow, persistence=persistence, checkpointer=checkpointer, provider=provider, file_store=file_store)
             runtime.start_initial(run, user_request="Initial application request")
             old_artifacts = tuple(item.id for item in persistence.artifacts.list(run_id=run.id))
             second = runtime.start_followup(
@@ -153,6 +126,9 @@ class CareerWorkflowTests(unittest.TestCase):
             self.assertTrue(all(item.dependencies == (new_draft.id,) for item in reviews))
             self.assertEqual(tuple(item.id for item in persistence.artifacts.list(run_id=run.id)), old_artifacts)
             self.assertEqual(len(persistence.revisions.list(session_id=session.id)), 2)
+            routing_calls = [call for call in provider.calls if "Route the follow-up only" in call["input_text"]]
+            self.assertEqual(len(routing_calls), 1)
+            self.assertIn("verified test evidence", routing_calls[0]["input_text"])
             self.assertTrue(any("verified test evidence" in call["input_text"] for call in provider.calls if call["instructions"].startswith("W4")))
             checkpointer.close()
             persistence.close()
@@ -168,14 +144,7 @@ class CareerWorkflowTests(unittest.TestCase):
                     return UserInputRequest(question="Confirm the final writing direction")
                 return None
 
-            runtime = CareerWorkflowRuntime(
-                workflow=workflow,
-                persistence=persistence,
-                checkpointer=checkpointer,
-                provider=provider,
-                file_store=file_store,
-                hitl_hook=hook,
-            )
+            runtime = CareerWorkflowRuntime(workflow=workflow, persistence=persistence, checkpointer=checkpointer, provider=provider, file_store=file_store, hitl_hook=hook)
             waiting = runtime.start_initial(run, user_request="Need HITL")
             self.assertEqual(waiting.graph.status, RunStatus.WAITING_FOR_USER)
             self.assertEqual(persistence.runs.get(run.id).status, RunStatus.WAITING_FOR_USER)
@@ -188,15 +157,9 @@ class CareerWorkflowTests(unittest.TestCase):
             persistence.close()
 
     def test_followup_stage_normalization_preserves_required_re_review(self) -> None:
-        self.assertEqual(
-            normalize_followup_stages(["w4_draft"]),
-            ("w4_draft", "w5_fact_review", "w6_reader_review"),
-        )
+        self.assertEqual(normalize_followup_stages(["w4_draft"]), ("w4_draft", "w5_fact_review", "w6_reader_review"))
         self.assertEqual(normalize_followup_stages(["w5_fact_review"]), ("w5_fact_review",))
-        self.assertEqual(
-            normalize_followup_stages(["w1_intake"]),
-            ("w1_intake", "w3_candidates", "w6_selection_review", "w3_strategy", "w4_draft", "w5_fact_review", "w6_reader_review"),
-        )
+        self.assertEqual(normalize_followup_stages(["w1_intake"]), ("w1_intake", "w3_candidates", "w6_selection_review", "w3_strategy", "w4_draft", "w5_fact_review", "w6_reader_review"))
 
 
 if __name__ == "__main__":
