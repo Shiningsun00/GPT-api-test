@@ -1,4 +1,48 @@
-from .notion import NotionAPIError, NotionClient, NotionConfig, extract_notion_id, parse_notion_source_lines
+from .notion import (
+    NotionAPIError,
+    NotionClient,
+    NotionConfig,
+    block_plain_text,
+    build_notion_reference_context,
+    extract_notion_id,
+    notion_property_text,
+    parse_notion_source_lines,
+    read_notion_page_text,
+)
+from .notion_workflow import (
+    DestructiveApproval,
+    NotionInboxAdapter,
+    NotionInboxConfig,
+    NotionInteractionError,
+    NotionReferenceContextProvider,
+    NotionSafetyError,
+    NotionSessionLinkStore,
+    NotionTask,
+    NotionWorkflowApiClient,
+    NotionWritePolicy,
+)
 from .openai_client import OpenAIEmbeddingProvider, OpenAIModelProvider
 
-__all__ = ["NotionAPIError", "NotionClient", "NotionConfig", "OpenAIEmbeddingProvider", "OpenAIModelProvider", "extract_notion_id", "parse_notion_source_lines"]
+__all__ = [
+    "DestructiveApproval",
+    "NotionAPIError",
+    "NotionClient",
+    "NotionConfig",
+    "NotionInboxAdapter",
+    "NotionInboxConfig",
+    "NotionInteractionError",
+    "NotionReferenceContextProvider",
+    "NotionSafetyError",
+    "NotionSessionLinkStore",
+    "NotionTask",
+    "NotionWorkflowApiClient",
+    "NotionWritePolicy",
+    "OpenAIEmbeddingProvider",
+    "OpenAIModelProvider",
+    "block_plain_text",
+    "build_notion_reference_context",
+    "extract_notion_id",
+    "notion_property_text",
+    "parse_notion_source_lines",
+    "read_notion_page_text",
+]
