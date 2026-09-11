@@ -5,6 +5,7 @@ on:
     branches:
       - step1-core-engine
       - step2-sqlite-persistence
+      - step3-langgraph-state-machine
   pull_request:
     branches:
       - main
@@ -24,6 +25,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Compile package
-        run: python -m compileall -q src tests
+        run: python -m compileall -q src tests scripts
       - name: Run unit and boundary tests
         run: python -m unittest discover -s tests -v
+      - name: Run STEP 3 smoke test
+        run: python scripts/manual_smoke_test.py --auto
