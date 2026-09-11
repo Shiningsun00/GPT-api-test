@@ -39,20 +39,28 @@ def build_fixture(root: Path):
     persistence = SQLitePersistence(root / "domain.sqlite")
     file_store = LocalFileStore(root / "data")
     provider = FakeProvider()
+    labels = {
+        "W1": "Evidence Intake",
+        "W2": "Role Analyst",
+        "W3": "Strategy Designer",
+        "W4": "Draft Writer",
+        "W5": "Fact Reviewer",
+        "W6": "Recruiter Reviewer",
+    }
     agents = {
         "M": Agent(id="manager", name="Manager", model="fake", system_prompt="MANAGER prompt"),
-        **{f"W{i}": Agent(id=f"agent-w{i}", name=f"W{i} worker", model="fake", system_prompt=f"W{i} prompt") for i in range(1, 7)},
+        **{role: Agent(id=f"agent-{role.lower()}", name=name, model="fake", system_prompt=f"{role} prompt") for role, name in labels.items()},
     }
     for agent in agents.values():
         persistence.agents.save(agent)
+    workers = [WorkerSlot(worker_id=f"slot-{role.lower()}", agent_id=agents[role].id) for role in labels]
     workflow = Workflow(
         id="career-workflow",
         name="Career Cover Letter",
         mode=WorkflowMode.HIERARCHICAL,
-        hierarchy=HierarchyConfig(
-            manager_agent_id=agents["M"].id,
-            workers=[WorkerSlot(worker_id=f"slot-w{i}", agent_id=agents[f"W{i}"].id) for i in range(1, 7)],
-        ),
+        hierarchy=HierarchyConfig(manager_agent_id=agents["M"].id, workers=workers),
+        policy_id="career_cover_letter",
+        policy_config={"slot_roles": {slot.worker_id: role for slot, role in zip(workers, labels)}},
     )
     persistence.workflows.save(workflow)
     session = new_session(workflow, session_id="session-1", title="Career test")
@@ -73,6 +81,23 @@ class CareerWorkflowTests(unittest.TestCase):
             with self.assertRaises(CareerRegistryError):
                 CareerWorkflowRuntime(workflow=workflow, persistence=persistence, checkpointer=checkpointer, provider=provider, file_store=file_store)
             checkpointer.close()
+            persistence.close()
+
+    def test_agent_names_do_not_define_career_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            persistence, file_store, provider, workflow, session, run = build_fixture(root)
+            names = [persistence.agents.get(slot.agent_id).name for slot in workflow.hierarchy.workers]
+            self.assertTrue(all(not name.startswith("W") for name in names))
+            runtime = CareerWorkflowRuntime(
+                workflow=workflow,
+                persistence=persistence,
+                checkpointer=SQLiteGraphCheckpointer(root / "graph.sqlite"),
+                provider=provider,
+                file_store=file_store,
+            )
+            self.assertEqual(set(runtime.registry.workers), {f"W{i}" for i in range(1, 7)})
+            runtime.engine.checkpointer.close()
             persistence.close()
 
     def test_initial_workflow_preserves_stage_order_dependencies_artifacts_and_revision(self) -> None:
