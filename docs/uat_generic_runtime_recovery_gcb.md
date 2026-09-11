@@ -34,145 +34,121 @@ These are re-checked at every checkpoint:
 
 # Multi-turn Recovery Plan
 
-## R0 — Gap Freeze / Architecture Decision
+## R0 — Gap Freeze / Architecture Decision — PASS
 ### Goal
 Freeze the exact PRD mismatch and decide the smallest correction architecture before implementation.
 
-### Context
-- PRD positions the product as a general-purpose Workflow Studio.
-- Workflow creation journey includes execution-policy selection.
-- Current API execution path is Career-only.
-- Generic LangGraph/domain foundations already exist and should be reused rather than replaced.
-
-### Boundary
-- No production behavior change in this checkpoint.
-- No removal of Career runtime.
-- No premature Graph editor / Marketplace / multi-user scope.
-- Do not encode domain roles in Agent names.
+### Approved decisions
+- `Workflow.policy_id=None` = Generic; `career_cover_letter` is explicit.
+- Policy-specific role binding lives at Workflow/WorkerSlot level, not Agent name.
+- Existing Workflows remain Generic by default; Career upgrade is conservative and evidence-based.
+- Generic Linear follows saved Step order/additional prompts.
+- Generic Hierarchical uses a durable Manager loop that may delegate WorkerSlot(s), request Human Input, or return Final.
 
 ### Gate
-- [ ] Map all Career hard-wiring points in API / runtime / UI / persistence.
-- [ ] Decide where `workflow policy/template` is stored and how old rows are migrated safely.
-- [ ] Decide how policy-specific role binding is represented without Agent-name coupling.
-- [ ] Define Generic Linear and Generic Hierarchical execution semantics.
-- [ ] Define backward-compatibility behavior for existing Career workflows.
-- [ ] PRD compliance review = PASS.
+- [x] Career hard-wiring points mapped.
+- [x] Workflow policy/template storage decided.
+- [x] Agent-name-independent role binding decided.
+- [x] Generic Linear semantics decided.
+- [x] Generic Hierarchical semantics decided.
+- [x] Backward compatibility behavior decided.
+- [x] PRD compliance review = PASS.
 
-## R1 — Domain / Persistence Policy Separation
+## R1 — Domain / Persistence Policy Separation — PASS
 ### Goal
 Represent Generic vs domain Policy/Template explicitly in durable Workflow configuration.
 
-### Context
-Generic execution must be the default product capability, while Career is an optional policy/template.
-
-### Boundary
-- Existing WorkflowSession/Run/Artifact/Revision semantics unchanged.
-- Existing stored workflows must migrate deterministically; no silent data loss.
-- Agent records remain domain-agnostic.
-
 ### Gate
-- [ ] Durable Workflow policy/template field or equivalent is implemented.
-- [ ] Generic is the default for newly created generic workflows.
-- [ ] Policy-specific role bindings are stored at Workflow/slot level, not inferred from Agent name.
-- [ ] SQLite migration is versioned/idempotent and reopen-safe.
-- [ ] Existing Career workflows retain a compatible migration path.
-- [ ] Domain/persistence tests PASS.
-- [ ] PRD compliance review = PASS.
+- [x] Durable Workflow policy/template representation.
+- [x] Generic default for new Workflows.
+- [x] Policy-specific role bindings at Workflow/slot level.
+- [x] SQLite v1→v2 migration is versioned/idempotent/reopen-safe.
+- [x] Conservative Career compatibility upgrader.
+- [x] Secret-like policy config rejected.
+- [x] 95 Python tests + existing smokes/final acceptance + React test/build PASS.
+- [x] PRD compliance review = PASS.
 
-## R2 — Generic Runtime
+## R2 — Generic Runtime — PASS
 ### Goal
 Allow arbitrary user-defined Linear and Hierarchical workflows to execute without Career W1–W6 requirements.
 
-### Context
-Primary UAT target is a Hierarchical workflow with one Manager and two arbitrary Workers.
-
-### Boundary
-- Reuse existing durable LangGraph/checkpoint machinery.
-- No domain-specific stage names or role validation in Generic runtime.
-- Preserve Worker Slot ID != Agent ID and duplicate-Agent-slot support.
-- Preserve HITL, attachments, restart/manual-resume, and append-only history rules.
+### Implemented behavior
+- `GenericWorkflowRuntime` runs only Generic (`policy_id=None`) Workflows and never infers behavior from Agent names.
+- Generic Linear executes arbitrary ordered Agents using saved Step IDs/additional prompts and persists immutable Artifacts + Revision.
+- Generic Hierarchical uses LangGraph Manager → WorkerSlot(s) / Human Input / Final routing.
+- WorkerSlot ID is the routing identity; the same Agent may occupy multiple distinct WorkerSlots.
+- Manager/Worker artifacts are passed as data context, never promoted to system instructions.
+- Initial execution-file routing and turn-scoped follow-up attachments are preserved.
+- Manager-requested HITL resumes the same Run/thread.
+- Worker failure pauses the Run; Manual Resume continues from the failed node without replaying the completed Manager decision.
+- Completed-result follow-up is durably saved first, creates a new Continuation Run, and appends Revision vN+1.
+- R2 does not alter FastAPI/UI runtime selection; those are intentionally gated to R3/R4.
 
 ### Gate
-- [ ] Generic Linear runtime works for arbitrary ordered Agents.
-- [ ] Generic Hierarchical runtime works for Manager + N Workers (including N=2).
-- [ ] Agent names are unrestricted in Generic runtime.
-- [ ] Duplicate Agent in distinct Worker Slots remains valid.
-- [ ] Initial files and turn-scoped follow-up files are available according to routing semantics.
-- [ ] HITL same-Run Resume and error Manual Resume remain valid.
-- [ ] Post-result follow-up creates a Continuation Run, not reactivation.
-- [ ] Generic runtime tests PASS.
-- [ ] PRD compliance review = PASS.
+- [x] Generic Linear runtime works for arbitrary ordered Agents.
+- [x] Generic Hierarchical runtime works for Manager + N Workers, including N=2.
+- [x] Agent names are unrestricted in Generic runtime.
+- [x] Duplicate Agent in distinct WorkerSlots remains valid.
+- [x] Initial files and turn-scoped follow-up files are available according to routing semantics.
+- [x] HITL same-Run Resume remains valid.
+- [x] Error Manual Resume remains valid without replaying completed Manager work.
+- [x] Post-result follow-up creates a Continuation Run and new Revision.
+- [x] 102 Python tests PASS.
+- [x] R2 Generic runtime smoke PASS: Manager + arbitrary Worker 2명 Hierarchical; arbitrary Agent 2명 Linear.
+- [x] Existing STEP 3/4/5/7/8/9 smokes + Final Acceptance 1–19 PASS.
+- [x] React test/build PASS.
+- [x] PRD compliance review = PASS for R2 scope.
 
-## R3 — Runtime Router / FastAPI
+### Compliance note
+The Recovery track is not complete. The service boundary still hard-wires Career runtime and the legacy Career runtime still resolves W1–W6 from Agent names. These known violations are explicitly reserved for R3 and are not accepted as final behavior.
+
+## R3 — Runtime Router / FastAPI — PENDING
 ### Goal
 Route a Run to the Workflow's selected policy/runtime rather than hard-wiring Career.
 
-### Context
-Clients should start a Workflow; the backend should resolve its durable execution policy.
+### Required
+- Run start resolves policy from Workflow configuration.
+- Generic Workflow invokes Generic runtime.
+- Career Workflow invokes Career runtime.
+- Career runtime consumes explicit WorkerSlot role bindings rather than Agent-name prefixes.
+- Generic Manager + 2 Worker API E2E PASS.
+- Career API regression PASS using explicit policy/role binding.
+- Resume/follow-up routing selects the correct runtime for the Run's Workflow.
+- Error responses distinguish invalid generic structure from policy-specific validation.
+- PRD compliance review = PASS.
 
-### Boundary
-- Do not trust a client default that can silently override the stored Workflow policy.
-- Preserve current API compatibility where reasonably possible.
-- Career runtime remains available only when the Workflow explicitly selects it.
-
-### Gate
-- [ ] Run start resolves policy from Workflow configuration.
-- [ ] Generic workflow invokes Generic runtime.
-- [ ] Career workflow invokes Career runtime.
-- [ ] Generic Manager + 2 Worker API E2E PASS.
-- [ ] Career API regression PASS.
-- [ ] Resume/follow-up routing selects the correct runtime for the Run's Workflow.
-- [ ] Error responses distinguish invalid generic structure from policy-specific validation.
-- [ ] PRD compliance review = PASS.
-
-## R4 — Local UI / Template UX
+## R4 — Local UI / Template UX — PENDING
 ### Goal
 Make the generic-first model obvious and prevent the UI from implying Career-specific naming rules for normal Agents.
 
-### Context
-Users create reusable Agents and then assign them inside a Workflow. Career role requirements should appear only when Career policy/template is selected.
+### Required
+- Workflow form exposes Generic vs Career policy/template selection.
+- Generic is the default.
+- Agent name examples are domain-neutral.
+- Career role mapping UI appears only for Career policy.
+- Career missing/duplicate roles are pre-validated.
+- Manager + 2 Worker Generic Workflow can be created/started from UI.
+- Issue #21 API-base connection UX is fixed/regression-tested.
+- UI tests/build PASS.
+- PRD compliance review = PASS.
 
-### Boundary
-- Form/List editor remains the 2.0 UX; no Visual Node Editor expansion.
-- No OpenAI/Notion/Discord secret fields in browser UI.
-
-### Gate
-- [ ] Workflow form exposes Generic vs Career policy/template selection.
-- [ ] Generic is the default.
-- [ ] Generic Agent name examples are domain-neutral.
-- [ ] Career-only role mapping UI appears only for Career policy.
-- [ ] UI validates missing/duplicate Career roles before execution/save where appropriate.
-- [ ] Manager + 2 Worker Generic workflow can be created and started from UI.
-- [ ] Existing UAT API-base connection issue remains tracked/fixed with regression coverage.
-- [ ] UI tests/build PASS.
-- [ ] PRD compliance review = PASS.
-
-## R5 — Regression / UAT Gate
+## R5 — Regression / UAT Gate — PENDING
 ### Goal
 Prove that restoring Generic execution did not break Career or cross-cutting durability guarantees.
 
-### Context
-This is the merge gate for the correction track.
-
-### Boundary
-No PASS based only on unit tests; include end-to-end credential-free and user-facing scenarios.
-
-### Gate
-- [ ] Generic Hierarchical: Manager + 2 arbitrary Workers → final result.
-- [ ] Generic Linear: 2+ arbitrary Agents → final result.
-- [ ] Generic arbitrary names (no W1–W6) PASS.
-- [ ] Duplicate Agent / distinct Worker Slots PASS.
-- [ ] Career Cover Letter W1–W6 template regression PASS using explicit role binding.
-- [ ] Initial Run + file PASS.
-- [ ] Agent HITL → same Run/thread Resume PASS.
-- [ ] Worker failure → Manual Resume PASS.
-- [ ] Completed result → follow-up + file → Continuation Run + new Revision PASS.
-- [ ] Restart does not auto-call external APIs PASS.
-- [ ] Artifact/Revision history immutability PASS.
-- [ ] Discord and Notion adapter regressions PASS against policy-aware routing.
-- [ ] Backup/import/recovery regression PASS.
-- [ ] React tests/build PASS.
-- [ ] PRD compliance review = PASS.
+### Required
+- Generic Hierarchical + Linear E2E.
+- No W1–W6 name dependency in Generic.
+- Duplicate Agent/distinct WorkerSlots.
+- Career explicit policy/role binding regression.
+- Initial file, HITL, Manual Resume, Continuation Run, immutable Artifact/Revision.
+- Discord/Notion policy-aware regressions.
+- Backup/import/recovery regression.
+- React tests/build.
+- Final UAT and PRD compliance review.
 
 ## Merge rule
 No implementation PR is merged until R0–R5 relevant gates are checked and the final PRD compliance review is PASS. If a checkpoint exposes a new product decision not fixed by PRD v1.0, stop and ask the user before implementing that decision.
+
+## Current gate
+**R0 PASS → R1 PASS → R2 PASS → STOP. User approval required before R3 implementation.**
