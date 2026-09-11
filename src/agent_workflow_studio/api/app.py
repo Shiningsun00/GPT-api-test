@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 from agent_workflow_studio.core.models import Agent, RunStatus, Workflow, WorkflowMode, utc_now
 from agent_workflow_studio.core.workflow import new_initial_run, new_session, validate_workflow
 from agent_workflow_studio.graph import SQLiteGraphCheckpointer
+from agent_workflow_studio.integrations.notion import NotionClient, NotionConfig
+from agent_workflow_studio.integrations.notion_workflow import NotionReferenceContextProvider
 from agent_workflow_studio.integrations.openai_client import OpenAIModelProvider
 from agent_workflow_studio.persistence import (
     LocalFileStore,
@@ -42,6 +44,7 @@ class BackendContext:
     checkpointer: SQLiteGraphCheckpointer
     file_store: LocalFileStore
     provider: Any
+    reference_context_provider: Any | None = None
     owns_resources: bool = False
 
     @classmethod
@@ -51,11 +54,19 @@ class BackendContext:
         persistence = SQLitePersistence(str(root_path / "domain.sqlite"))
         checkpointer = SQLiteGraphCheckpointer(root_path / "graph.sqlite")
         file_store = LocalFileStore(root_path / "files")
+
+        reference_context_provider = None
+        notion_token = os.getenv("NOTION_API_TOKEN") or os.getenv("NOTION_TOKEN")
+        if notion_token:
+            notion_client = NotionClient(NotionConfig(token=notion_token))
+            reference_context_provider = NotionReferenceContextProvider(notion_client)
+
         return cls(
             persistence=persistence,
             checkpointer=checkpointer,
             file_store=file_store,
             provider=provider or LazyOpenAIProvider(os.getenv("OPENAI_API_KEY")),
+            reference_context_provider=reference_context_provider,
             owns_resources=True,
         )
 
@@ -126,6 +137,7 @@ def _runtime_for_workflow(context: BackendContext, workflow: Workflow) -> Career
             checkpointer=context.checkpointer,
             provider=context.provider,
             file_store=context.file_store,
+            reference_context_provider=context.reference_context_provider,
         )
     except (CareerWorkflowError, PersistenceError, PersistenceConflictError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -170,7 +182,7 @@ def _graph_result_payload(outcome: Any) -> dict[str, Any]:
 
 def create_app(context: BackendContext | None = None) -> FastAPI:
     ctx = context or BackendContext.local()
-    app = FastAPI(title="Agent Workflow Studio API", version="2.0-step5")
+    app = FastAPI(title="Agent Workflow Studio API", version="2.0-step8")
     app.state.backend = ctx
 
     if ctx.owns_resources:
