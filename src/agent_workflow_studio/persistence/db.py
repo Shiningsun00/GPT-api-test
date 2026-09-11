@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
+from threading import RLock
 from typing import Iterator
 
 from .errors import SchemaVersionError
@@ -10,13 +11,23 @@ from .schema import CURRENT_SCHEMA_VERSION, MIGRATIONS
 
 
 class SQLiteDatabase:
-    """Single-user SQLite connection with explicit nested transactions."""
+    """Single-user SQLite connection with explicit nested transactions.
+
+    The connection may be used by FastAPI's worker threads. Transaction state is
+    guarded by an RLock so nested writes remain serialized while preserving the
+    existing single-process/local-first semantics.
+    """
 
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
+        self.connection = sqlite3.connect(
+            self.path,
+            timeout=5.0,
+            isolation_level=None,
+            check_same_thread=False,
+        )
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA busy_timeout = 5000")
@@ -24,6 +35,7 @@ class SQLiteDatabase:
             self.connection.execute("PRAGMA journal_mode = WAL")
             self.connection.execute("PRAGMA synchronous = NORMAL")
         self._transaction_depth = 0
+        self._transaction_lock = RLock()
         self._closed = False
         self.initialize()
 
@@ -31,29 +43,30 @@ class SQLiteDatabase:
     def transaction(self) -> Iterator[sqlite3.Connection]:
         if self._closed:
             raise RuntimeError("database is closed")
-        depth = self._transaction_depth
-        savepoint = f"aws_sp_{depth}"
-        if depth == 0:
-            self.connection.execute("BEGIN IMMEDIATE")
-        else:
-            self.connection.execute(f"SAVEPOINT {savepoint}")
-        self._transaction_depth += 1
-        try:
-            yield self.connection
-        except Exception:
-            self._transaction_depth -= 1
+        with self._transaction_lock:
+            depth = self._transaction_depth
+            savepoint = f"aws_sp_{depth}"
             if depth == 0:
-                self.connection.execute("ROLLBACK")
+                self.connection.execute("BEGIN IMMEDIATE")
             else:
-                self.connection.execute(f"ROLLBACK TO {savepoint}")
-                self.connection.execute(f"RELEASE {savepoint}")
-            raise
-        else:
-            self._transaction_depth -= 1
-            if depth == 0:
-                self.connection.execute("COMMIT")
+                self.connection.execute(f"SAVEPOINT {savepoint}")
+            self._transaction_depth += 1
+            try:
+                yield self.connection
+            except Exception:
+                self._transaction_depth -= 1
+                if depth == 0:
+                    self.connection.execute("ROLLBACK")
+                else:
+                    self.connection.execute(f"ROLLBACK TO {savepoint}")
+                    self.connection.execute(f"RELEASE {savepoint}")
+                raise
             else:
-                self.connection.execute(f"RELEASE {savepoint}")
+                self._transaction_depth -= 1
+                if depth == 0:
+                    self.connection.execute("COMMIT")
+                else:
+                    self.connection.execute(f"RELEASE {savepoint}")
 
     def initialize(self) -> None:
         self.connection.execute(
