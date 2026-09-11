@@ -8,6 +8,7 @@ on:
       - step3-langgraph-state-machine
       - step4-career-workflow-migration
       - step5-fastapi-backend
+      - step6-react-local-ui
   pull_request:
     branches:
       - main
@@ -36,3 +37,22 @@ jobs:
         run: python scripts/manual_career_smoke_test.py
       - name: Run STEP 5 API smoke test
         run: python scripts/manual_api_smoke_test.py
+
+  local-ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install UI dependencies
+        run: npm install
+      - name: Run UI tests
+        run: npm test
+      - name: Build production UI
+        run: npm run build
