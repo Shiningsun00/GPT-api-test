@@ -31,9 +31,16 @@ class Step3BoundaryTests(unittest.TestCase):
     def test_generic_graph_does_not_import_career_policy(self) -> None:
         offenders = []
         for path in (SRC / "graph").rglob("*.py"):
-            text = path.read_text(encoding="utf-8")
-            if "career_cover_letter" in text or "W1" in text or "W6" in text:
-                offenders.append(str(path))
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                names = []
+                if isinstance(node, ast.Import):
+                    names.extend(alias.name for alias in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names.append(node.module)
+                for name in names:
+                    if name == "agent_workflow_studio.policies" or name.startswith("agent_workflow_studio.policies."):
+                        offenders.append(f"{path}:{name}")
         self.assertEqual(offenders, [])
 
     def test_checkpoint_uses_strict_non_pickle_serializer(self) -> None:
