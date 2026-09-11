@@ -6,8 +6,12 @@ export function normalizeBaseUrl(value) {
   return trimmed.replace(/\/+$/, '')
 }
 
+export function defaultApiBase(runtime = globalThis) {
+  return runtime && runtime.__TAURI_INTERNALS__ ? 'http://127.0.0.1:8765/api' : '/api'
+}
+
 export function loadApiBase() {
-  return normalizeBaseUrl(localStorage.getItem(STORAGE_KEY) || '/api')
+  return normalizeBaseUrl(localStorage.getItem(STORAGE_KEY) || defaultApiBase())
 }
 
 export function saveApiBase(value) {
@@ -90,6 +94,7 @@ export function createApiClient(baseUrl = loadApiBase()) {
       runs: (id) => request(`/sessions/${id}/runs`),
       artifacts: (id) => request(`/sessions/${id}/artifacts`),
       revisions: (id) => request(`/sessions/${id}/revisions`),
+      files: (id) => request(`/sessions/${id}/files`),
       followUp: (id, previousRunId, content, files = []) => {
         const form = new FormData()
         form.append('previous_run_id', previousRunId)
@@ -100,9 +105,33 @@ export function createApiClient(baseUrl = loadApiBase()) {
     },
     runs: {
       start: (payload) => request('/runs', { method: 'POST', body: JSON.stringify(payload) }),
+      startWithFiles: (sessionId, userRequest, files = [], targetIds = []) => {
+        const form = new FormData()
+        form.append('session_id', sessionId)
+        form.append('user_request', userRequest)
+        targetIds.forEach((target) => form.append('target_ids', target))
+        files.forEach((file) => form.append('files', file))
+        return request('/runs/with-files', { method: 'POST', body: form })
+      },
       get: (id) => request(`/runs/${id}`),
       history: (id) => request(`/runs/${id}/history`),
       resume: (id, payload) => request(`/runs/${id}/resume`, { method: 'POST', body: JSON.stringify(payload) }),
+    },
+    maintenance: {
+      status: () => request('/maintenance/status'),
+      backup: () => request('/maintenance/backups', { method: 'POST' }),
+      cleanup: (apply = false) => request('/maintenance/cleanup', { method: 'POST', body: JSON.stringify({ apply }) }),
+      importWorkspace: (file, conflictPolicy = 'fail') => {
+        const form = new FormData()
+        form.append('file', file)
+        form.append('conflict_policy', conflictPolicy)
+        return request('/maintenance/import-workspace', { method: 'POST', body: form })
+      },
+      validateBackup: (file) => {
+        const form = new FormData()
+        form.append('file', file)
+        return request('/maintenance/validate-backup', { method: 'POST', body: form })
+      },
     },
   }
 }

@@ -9,3 +9,9 @@ data/
 *.sqlite-wal
 *.sqlite-shm
 *.db
+.desktop-build/
+ui/dist/
+ui/node_modules/
+ui/src-tauri/target/
+ui/src-tauri/binaries/aws2-backend-*
+!ui/src-tauri/binaries/README.md

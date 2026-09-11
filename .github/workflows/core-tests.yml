@@ -11,6 +11,7 @@ on:
       - step6-react-local-ui
       - step7-discord-integration
       - step8-notion-interaction
+      - step9-desktop-qa
   pull_request:
     branches:
       - main
@@ -43,6 +44,10 @@ jobs:
         run: python scripts/manual_discord_smoke_test.py
       - name: Run STEP 8 Notion adapter smoke test
         run: python scripts/manual_notion_smoke_test.py
+      - name: Run STEP 9 maintenance smoke test
+        run: python scripts/manual_step9_smoke_test.py
+      - name: Run final acceptance 1-19
+        run: python scripts/manual_final_acceptance_test.py
 
   local-ui:
     runs-on: ubuntu-latest
