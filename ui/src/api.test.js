@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeBaseUrl, workflowPayloadFromForm } from './api.js'
+import { defaultApiBase, normalizeBaseUrl, workflowPayloadFromForm } from './api.js'
 
-describe('normalizeBaseUrl', () => {
+describe('API base', () => {
   it('uses local proxy by default', () => {
     expect(normalizeBaseUrl('')).toBe('/api')
+    expect(defaultApiBase({})).toBe('/api')
+  })
+
+  it('uses the fixed loopback sidecar in Tauri', () => {
+    expect(defaultApiBase({ __TAURI_INTERNALS__: {} })).toBe('http://127.0.0.1:8765/api')
   })
 
   it('removes trailing slashes', () => {
