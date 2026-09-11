@@ -62,18 +62,22 @@ class FastAPITests(unittest.TestCase):
             json={"id": "manager", "name": "Manager", "model": "fake", "system_prompt": "MANAGER prompt"},
         )
         self.assertEqual(manager.status_code, 201)
+        names = ["Evidence Intake", "Role Analyst", "Strategy Designer", "Draft Writer", "Fact Reviewer", "Recruiter Reviewer"]
         for i in range(1, 7):
             response = self.client.post(
                 "/agents",
-                json={"id": f"agent-w{i}", "name": f"W{i} worker", "model": "fake", "system_prompt": f"W{i} prompt"},
+                json={"id": f"agent-w{i}", "name": names[i - 1], "model": "fake", "system_prompt": f"W{i} prompt"},
             )
             self.assertEqual(response.status_code, 201)
+        slot_roles = {f"slot-w{i}": f"W{i}" for i in range(1, 7)}
         workflow = self.client.post(
             "/workflows",
             json={
                 "id": "career-workflow",
                 "name": "Career Cover Letter",
                 "mode": "hierarchical",
+                "policy_id": "career_cover_letter",
+                "policy_config": {"slot_roles": slot_roles},
                 "hierarchy": {
                     "manager_agent_id": "manager",
                     "workers": [
@@ -109,6 +113,7 @@ class FastAPITests(unittest.TestCase):
             json={"id": "linear-1", "name": "Linear", "mode": "linear", "steps": []},
         )
         self.assertEqual(workflow.status_code, 201)
+        self.assertIsNone(workflow.json()["policy_id"])
         self.assertEqual(self.client.get("/workflows/linear-1").status_code, 200)
         self.assertEqual(self.client.delete("/workflows/linear-1").status_code, 204)
         self.assertEqual(self.client.delete("/agents/a1").status_code, 204)
@@ -187,11 +192,23 @@ class FastAPITests(unittest.TestCase):
     def test_run_errors_are_normalized(self) -> None:
         missing = self.client.get("/runs/does-not-exist")
         self.assertEqual(missing.status_code, 404)
+        self.client.post("/agents", json={"id": "a1", "name": "A1", "model": "fake"})
+        workflow = self.client.post(
+            "/workflows",
+            json={"id": "unsupported", "name": "Unsupported", "mode": "linear", "steps": [{"step_id": "s1", "agent_id": "a1"}], "policy_id": "other"},
+        )
+        self.assertEqual(workflow.status_code, 201)
+        self.client.post("/sessions", json={"id": "unsupported-session", "workflow_id": "unsupported"})
         unsupported = self.client.post(
             "/runs",
-            json={"session_id": "missing", "user_request": "x", "policy": "other"},
+            json={"session_id": "unsupported-session", "user_request": "x"},
         )
         self.assertEqual(unsupported.status_code, 422)
+        mismatch = self.client.post(
+            "/runs",
+            json={"session_id": "unsupported-session", "user_request": "x", "policy": "generic"},
+        )
+        self.assertEqual(mismatch.status_code, 409)
 
 
 if __name__ == "__main__":
