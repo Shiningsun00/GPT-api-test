@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 REQUIRED_TABLES = frozenset(
     {
@@ -248,5 +248,9 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX idx_events_run ON execution_events(run_id, created_at)",
         "CREATE INDEX idx_run_files_run ON run_files(run_id, created_at)",
         "CREATE INDEX idx_external_links_session ON external_thread_links(session_id, provider)",
+    ),
+    2: (
+        "ALTER TABLE workflows ADD COLUMN policy_id TEXT",
+        "ALTER TABLE workflows ADD COLUMN policy_config_json TEXT NOT NULL DEFAULT '{}'",
     ),
 }
