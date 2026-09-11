@@ -50,14 +50,37 @@ export function createApiClient(baseUrl = loadApiBase()) {
     health: () => request('/health'),
     agents: {
       list: () => request('/agents'),
+      get: (id) => request(`/agents/${id}`),
       create: (payload) => request('/agents', { method: 'POST', body: JSON.stringify(payload) }),
-      update: (id, payload) => request(`/agents/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+      update: async (id, payload) => {
+        const existing = await request(`/agents/${id}`)
+        const merged = {
+          ...payload,
+          source_ids: existing.source_ids || [],
+          notion_enabled: !!existing.notion_enabled,
+          notion_sources: existing.notion_sources || [],
+        }
+        return request(`/agents/${id}`, { method: 'PUT', body: JSON.stringify(merged) })
+      },
       remove: (id) => request(`/agents/${id}`, { method: 'DELETE' }),
     },
     workflows: {
       list: () => request('/workflows'),
+      get: (id) => request(`/workflows/${id}`),
       create: (payload) => request('/workflows', { method: 'POST', body: JSON.stringify(payload) }),
-      update: (id, payload) => request(`/workflows/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+      update: async (id, payload) => {
+        const existing = await request(`/workflows/${id}`)
+        const merged = { ...payload }
+        if (payload.mode === 'hierarchical' && existing.mode === 'hierarchical' && existing.hierarchy) {
+          merged.hierarchy = {
+            ...payload.hierarchy,
+            manager_planning_prompt: existing.hierarchy.manager_planning_prompt || payload.hierarchy?.manager_planning_prompt || '',
+            manager_synthesis_prompt: existing.hierarchy.manager_synthesis_prompt || payload.hierarchy?.manager_synthesis_prompt || '',
+            manager_routing_prompt: existing.hierarchy.manager_routing_prompt || payload.hierarchy?.manager_routing_prompt || '',
+          }
+        }
+        return request(`/workflows/${id}`, { method: 'PUT', body: JSON.stringify(merged) })
+      },
       remove: (id) => request(`/workflows/${id}`, { method: 'DELETE' }),
     },
     sessions: {
