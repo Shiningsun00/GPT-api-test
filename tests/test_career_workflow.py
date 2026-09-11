@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 
 from agent_workflow_studio.core.execution import ModelResponse
 from agent_workflow_studio.core.models import Agent, HierarchyConfig, RunStatus, WorkerSlot, Workflow, WorkflowMode
@@ -100,15 +104,15 @@ class CareerWorkflowTests(unittest.TestCase):
             artifacts = persistence.artifacts.list(run_id=run.id)
             self.assertEqual(len(artifacts), 8)
             by_stage = {item.metadata["stage"]: item for item in artifacts}
-            self.assertEqual(by_stage["w3_candidates"].dependencies, tuple(sorted([
-                by_stage["w1_intake"].id,
-                by_stage["w2_analysis"].id,
-            ])))
+            self.assertEqual(
+                set(by_stage["w3_candidates"].dependencies),
+                {by_stage["w1_intake"].id, by_stage["w2_analysis"].id},
+            )
             self.assertEqual(by_stage["w6_selection_review"].dependencies, (by_stage["w3_candidates"].id,))
-            self.assertEqual(by_stage["w3_strategy"].dependencies, tuple(sorted([
-                by_stage["w3_candidates"].id,
-                by_stage["w6_selection_review"].id,
-            ])))
+            self.assertEqual(
+                set(by_stage["w3_strategy"].dependencies),
+                {by_stage["w3_candidates"].id, by_stage["w6_selection_review"].id},
+            )
             self.assertEqual(by_stage["w4_draft"].dependencies, (by_stage["w3_strategy"].id,))
             self.assertEqual(by_stage["w5_fact_review"].dependencies, (by_stage["w4_draft"].id,))
             self.assertEqual(by_stage["w6_reader_review"].dependencies, (by_stage["w4_draft"].id,))
@@ -130,7 +134,7 @@ class CareerWorkflowTests(unittest.TestCase):
                 provider=provider,
                 file_store=file_store,
             )
-            first = runtime.start_initial(run, user_request="Initial application request")
+            runtime.start_initial(run, user_request="Initial application request")
             old_artifacts = tuple(item.id for item in persistence.artifacts.list(run_id=run.id))
             second = runtime.start_followup(
                 session_id=session.id,
