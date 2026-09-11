@@ -7,6 +7,7 @@ on:
       - step2-sqlite-persistence
       - step3-langgraph-state-machine
       - step4-career-workflow-migration
+      - step5-fastapi-backend
   pull_request:
     branches:
       - main
@@ -33,3 +34,5 @@ jobs:
         run: python scripts/manual_smoke_test.py --auto
       - name: Run STEP 4 career smoke test
         run: python scripts/manual_career_smoke_test.py
+      - name: Run STEP 5 API smoke test
+        run: python scripts/manual_api_smoke_test.py
