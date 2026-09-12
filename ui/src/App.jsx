@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
-import { createApiClient, loadApiBase, saveApiBase, workflowPayloadFromForm } from './api.js'
+import {
+  CAREER_POLICY_ID,
+  CAREER_ROLES,
+  createApiClient,
+  defaultApiBase,
+  loadApiBase,
+  saveApiBase,
+  workflowPayloadFromForm,
+} from './api.js'
 
 const navItems = [
   ['run', 'Run Studio'],
@@ -10,7 +18,14 @@ const navItems = [
 ]
 
 const emptyAgent = () => ({ id: '', name: '', model: 'gpt-5.6-luna', system_prompt: '', rag_enabled: false, rag_top_k: 5 })
-const emptyWorkflow = () => ({ id: '', name: '', mode: 'hierarchical', manager_agent_id: '', rows: [{ worker_id: 'worker-1', agent_id: '', additional_prompt: '' }] })
+const emptyWorkflow = () => ({
+  id: '',
+  name: '',
+  mode: 'hierarchical',
+  policy_id: 'generic',
+  manager_agent_id: '',
+  rows: [{ worker_id: 'worker-1', agent_id: '', additional_prompt: '', career_role: '' }],
+})
 
 function Button({ children, tone = 'primary', ...props }) {
   return <button className={`button ${tone}`} {...props}>{children}</button>
@@ -42,6 +57,10 @@ function latestRevision(revisions) {
   return [...revisions].sort((a, b) => (b.version || b.revision || 0) - (a.version || a.revision || 0))[0]
 }
 
+function policyLabel(workflow) {
+  return workflow.policy_id === CAREER_POLICY_ID ? 'Career Cover Letter' : 'Generic'
+}
+
 function AgentsPage({ api, agents, refresh, notify }) {
   const [form, setForm] = useState(emptyAgent())
   const [editing, setEditing] = useState(null)
@@ -64,12 +83,12 @@ function AgentsPage({ api, agents, refresh, notify }) {
     try { await api.agents.remove(id); notify('Agent가 삭제되었습니다.'); await refresh() } catch (error) { notify(error.message, 'error') }
   }
   return <div className="two-column">
-    <div><div className="section-title"><div><span className="eyebrow">CONFIGURATION</span><h2>Agents</h2><p>모델과 역할 지침을 Form 방식으로 관리합니다.</p></div></div>
+    <div><div className="section-title"><div><span className="eyebrow">CONFIGURATION</span><h2>Agents</h2><p>Agent 이름은 Workflow 역할과 독립적이며 여러 Workflow에서 재사용할 수 있습니다.</p></div></div>
       <div className="stack">{agents.length ? agents.map((agent) => <Card key={agent.id} title={agent.name} meta={`${agent.model} · ${agent.id}`} actions={<div className="row"><Button tone="ghost" onClick={() => edit(agent)}>수정</Button><Button tone="danger" onClick={() => remove(agent.id)}>삭제</Button></div>}><p className="clamp">{agent.system_prompt || 'System prompt 없음'}</p></Card>) : <Empty title="Agent가 없습니다" body="오른쪽 폼에서 첫 Agent를 생성하세요." />}</div>
     </div>
     <form className="panel sticky" onSubmit={save}><div className="panel-title"><h3>{editing ? 'Agent 수정' : '새 Agent'}</h3>{editing && <Button type="button" tone="ghost" onClick={() => { setEditing(null); setForm(emptyAgent()) }}>취소</Button>}</div>
-      <Field label="ID" hint="비워두면 자동 생성됩니다."><input disabled={!!editing} value={form.id} onChange={(e) => setForm({ ...form, id: e.target.value })} placeholder="agent-w1" /></Field>
-      <Field label="이름"><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Evidence Manager" /></Field>
+      <Field label="ID" hint="비워두면 자동 생성됩니다."><input disabled={!!editing} value={form.id} onChange={(e) => setForm({ ...form, id: e.target.value })} placeholder="research-agent" /></Field>
+      <Field label="이름"><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Researcher" /></Field>
       <Field label="모델"><input required value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} /></Field>
       <Field label="System prompt"><textarea rows="9" value={form.system_prompt} onChange={(e) => setForm({ ...form, system_prompt: e.target.value })} placeholder="이 Agent의 역할과 제약을 입력하세요." /></Field>
       <div className="inline-fields"><label className="check"><input type="checkbox" checked={form.rag_enabled} onChange={(e) => setForm({ ...form, rag_enabled: e.target.checked })} />RAG 사용</label><Field label="Top K"><input type="number" min="1" max="20" value={form.rag_top_k} onChange={(e) => setForm({ ...form, rag_top_k: Number(e.target.value) })} /></Field></div>
@@ -81,8 +100,13 @@ function AgentsPage({ api, agents, refresh, notify }) {
 function WorkflowsPage({ api, agents, workflows, refresh, notify }) {
   const [form, setForm] = useState(emptyWorkflow())
   const [editing, setEditing] = useState(null)
-  const addRow = () => setForm({ ...form, rows: [...form.rows, { worker_id: `worker-${form.rows.length + 1}`, agent_id: '', additional_prompt: '' }] })
+  const addRow = () => setForm({ ...form, rows: [...form.rows, { worker_id: `worker-${form.rows.length + 1}`, agent_id: '', additional_prompt: '', career_role: '' }] })
   const patchRow = (index, patch) => setForm({ ...form, rows: form.rows.map((row, i) => i === index ? { ...row, ...patch } : row) })
+  const selectPolicy = (policyId) => setForm({
+    ...form,
+    policy_id: policyId,
+    mode: policyId === CAREER_POLICY_ID ? 'hierarchical' : form.mode,
+  })
   const save = async (event) => {
     event.preventDefault()
     try {
@@ -95,30 +119,37 @@ function WorkflowsPage({ api, agents, workflows, refresh, notify }) {
   }
   const edit = (wf) => {
     const hierarchical = wf.mode === 'hierarchical'
+    const slotRoles = wf.policy_config?.slot_roles || {}
     setEditing(wf.id)
     setForm({
       id: wf.id,
       name: wf.name,
       mode: wf.mode,
+      policy_id: wf.policy_id || 'generic',
       manager_agent_id: hierarchical ? wf.hierarchy?.manager_agent_id || '' : '',
-      rows: hierarchical ? (wf.hierarchy?.workers || []) : (wf.steps || []).map((step) => ({ worker_id: step.step_id, agent_id: step.agent_id, additional_prompt: step.additional_prompt || '' })),
+      rows: hierarchical
+        ? (wf.hierarchy?.workers || []).map((worker) => ({ ...worker, career_role: slotRoles[worker.worker_id] || '' }))
+        : (wf.steps || []).map((step) => ({ worker_id: step.step_id, agent_id: step.agent_id, additional_prompt: step.additional_prompt || '', career_role: '' })),
     })
   }
   const remove = async (id) => {
     if (!confirm('이 Workflow를 삭제할까요?')) return
     try { await api.workflows.remove(id); notify('Workflow가 삭제되었습니다.'); await refresh() } catch (error) { notify(error.message, 'error') }
   }
+  const career = form.policy_id === CAREER_POLICY_ID
   return <div className="two-column wide-form">
-    <div><div className="section-title"><div><span className="eyebrow">ORCHESTRATION</span><h2>Workflows</h2><p>Visual node editor 대신 명확한 Form/List 방식으로 구성합니다.</p></div></div>
-      <div className="stack">{workflows.length ? workflows.map((wf) => <Card key={wf.id} title={wf.name} meta={`${wf.mode} · ${wf.id}`} actions={<div className="row"><Button tone="ghost" onClick={() => edit(wf)}>수정</Button><Button tone="danger" onClick={() => remove(wf.id)}>삭제</Button></div>}><div className="chips"><span>{wf.mode === 'hierarchical' ? `Workers ${wf.hierarchy?.workers?.length || 0}` : `Steps ${wf.steps?.length || 0}`}</span>{wf.hierarchy?.manager_agent_id && <span>Manager {wf.hierarchy.manager_agent_id}</span>}</div></Card>) : <Empty title="Workflow가 없습니다" body="Agent를 만든 뒤 새 Workflow를 구성하세요." />}</div>
+    <div><div className="section-title"><div><span className="eyebrow">ORCHESTRATION</span><h2>Workflows</h2><p>Generic이 기본이며, 업무별 규칙은 명시적인 Policy / Template으로 선택합니다.</p></div></div>
+      <div className="stack">{workflows.length ? workflows.map((wf) => <Card key={wf.id} title={wf.name} meta={`${policyLabel(wf)} · ${wf.mode} · ${wf.id}`} actions={<div className="row"><Button tone="ghost" onClick={() => edit(wf)}>수정</Button><Button tone="danger" onClick={() => remove(wf.id)}>삭제</Button></div>}><div className="chips"><span>{wf.mode === 'hierarchical' ? `Workers ${wf.hierarchy?.workers?.length || 0}` : `Steps ${wf.steps?.length || 0}`}</span>{wf.hierarchy?.manager_agent_id && <span>Manager {wf.hierarchy.manager_agent_id}</span>}{wf.policy_id === CAREER_POLICY_ID && <span>Explicit W1–W6 roles</span>}</div></Card>) : <Empty title="Workflow가 없습니다" body="Agent를 만든 뒤 Generic Workflow부터 자유롭게 구성할 수 있습니다." />}</div>
     </div>
     <form className="panel sticky" onSubmit={save}><div className="panel-title"><h3>{editing ? 'Workflow 수정' : '새 Workflow'}</h3>{editing && <Button type="button" tone="ghost" onClick={() => { setEditing(null); setForm(emptyWorkflow()) }}>취소</Button>}</div>
-      <Field label="ID"><input disabled={!!editing} value={form.id} onChange={(e) => setForm({ ...form, id: e.target.value })} placeholder="career-workflow" /></Field>
-      <Field label="이름"><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-      <Field label="구조"><select value={form.mode} onChange={(e) => setForm({ ...form, mode: e.target.value })}><option value="hierarchical">Hierarchical</option><option value="linear">Linear</option></select></Field>
+      <Field label="ID"><input disabled={!!editing} value={form.id} onChange={(e) => setForm({ ...form, id: e.target.value })} placeholder="analysis-workflow" /></Field>
+      <Field label="이름"><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Research & Review" /></Field>
+      <Field label="실행 Policy / Template" hint="Generic은 Agent 이름/역할을 제한하지 않습니다. Career를 선택한 경우에만 W1–W6 역할 매핑이 필요합니다."><select value={form.policy_id} onChange={(e) => selectPolicy(e.target.value)}><option value="generic">Generic</option><option value={CAREER_POLICY_ID}>Career Cover Letter</option></select></Field>
+      <Field label="구조"><select value={form.mode} onChange={(e) => setForm({ ...form, mode: e.target.value })}><option value="hierarchical">Hierarchical</option><option value="linear" disabled={career}>Linear</option></select></Field>
+      {career && <div className="action-box"><h4>Career Cover Letter 역할 매핑</h4><p>Agent 이름과 무관하게 각 Worker Slot에 W1~W6를 정확히 한 번씩 지정하세요. 누락·중복은 저장 전에 차단됩니다.</p></div>}
       {form.mode === 'hierarchical' && <Field label="Manager Agent"><select required value={form.manager_agent_id} onChange={(e) => setForm({ ...form, manager_agent_id: e.target.value })}><option value="">선택</option>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></Field>}
       <div className="worker-header"><strong>{form.mode === 'linear' ? 'Steps' : 'Workers'}</strong><Button type="button" tone="ghost" onClick={addRow}>+ 추가</Button></div>
-      <div className="workers">{form.rows.map((row, index) => <div className="worker" key={`${index}-${row.worker_id}`}><input aria-label="slot id" value={row.worker_id} onChange={(e) => patchRow(index, { worker_id: e.target.value })} placeholder={form.mode === 'linear' ? 'step-1' : 'worker-1'} /><select required value={row.agent_id} onChange={(e) => patchRow(index, { agent_id: e.target.value })}><option value="">Agent 선택</option>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select><textarea rows="2" value={row.additional_prompt} onChange={(e) => patchRow(index, { additional_prompt: e.target.value })} placeholder="추가 지침 (선택)" /><button className="icon-button" type="button" aria-label="remove worker" onClick={() => setForm({ ...form, rows: form.rows.filter((_, i) => i !== index) })}>×</button></div>)}</div>
+      <div className="workers">{form.rows.map((row, index) => <div className={`worker ${career ? 'career' : ''}`} key={`${index}-${row.worker_id}`}><input aria-label="slot id" value={row.worker_id} onChange={(e) => patchRow(index, { worker_id: e.target.value })} placeholder={form.mode === 'linear' ? 'step-1' : 'worker-1'} /><select required value={row.agent_id} onChange={(e) => patchRow(index, { agent_id: e.target.value })}><option value="">Agent 선택</option>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select>{career && <select aria-label="career role" required value={row.career_role || ''} onChange={(e) => patchRow(index, { career_role: e.target.value })}><option value="">Career role 선택</option>{CAREER_ROLES.map(([role, label]) => <option key={role} value={role}>{role} · {label}</option>)}</select>}<textarea rows="2" value={row.additional_prompt || ''} onChange={(e) => patchRow(index, { additional_prompt: e.target.value })} placeholder="추가 지침 (선택)" /><button className="icon-button" type="button" aria-label="remove worker" onClick={() => setForm({ ...form, rows: form.rows.filter((_, i) => i !== index) })}>×</button></div>)}</div>
       <Button type="submit">{editing ? '변경 저장' : 'Workflow 생성'}</Button>
     </form>
   </div>
@@ -186,13 +217,13 @@ function RunStudio({ api, workflows, sessions, onRefreshSessions, notify }) {
   return <div className="studio-grid">
     <div className="stack">
       <section className="hero"><span className="eyebrow">LOCAL-FIRST ORCHESTRATION</span><h2>Run Studio</h2><p>Workflow Session을 만들고 실행·중단·재개·후속수정을 한 화면에서 관리합니다.</p></section>
-      <Card title="1. Session 선택 또는 생성"><div className="form-grid"><Field label="기존 Session"><select value={sessionId} onChange={(e) => setSessionId(e.target.value)}><option value="">선택</option>{sessions.map((session) => <option key={session.id} value={session.id}>{session.title || session.id}</option>)}</select></Field><Field label="새 Session Workflow"><select value={workflowId} onChange={(e) => setWorkflowId(e.target.value)}><option value="">선택</option>{workflows.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name}</option>)}</select></Field><Field label="Session 이름"><input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="LG엔솔 자기소개서" /></Field><div className="field button-field"><span>&nbsp;</span><Button onClick={createSession}>새 Session</Button></div></div></Card>
-      <Card title="2. Initial Run"><Field label="사용자 요청"><textarea rows="6" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="검증된 경험을 바탕으로 자기소개서를 작성해줘." /></Field><Field label="실행 파일" hint="LLM 실행 전에 로컬 저장소에 먼저 영구 기록되며, Target 미지정 시 전체 Workflow에서 참조할 수 있습니다."><input type="file" multiple onChange={(e) => setInitialFiles([...e.target.files])} /></Field><small>{initialFiles.length ? `${initialFiles.length}개 파일 선택됨` : '파일 첨부는 선택입니다.'}</small><Button disabled={busy || !sessionId} onClick={start}>{busy ? '실행 중…' : 'Run 시작'}</Button></Card>
+      <Card title="1. Session 선택 또는 생성"><div className="form-grid"><Field label="기존 Session"><select value={sessionId} onChange={(e) => setSessionId(e.target.value)}><option value="">선택</option>{sessions.map((session) => <option key={session.id} value={session.id}>{session.title || session.id}</option>)}</select></Field><Field label="새 Session Workflow"><select value={workflowId} onChange={(e) => setWorkflowId(e.target.value)}><option value="">선택</option>{workflows.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name} · {policyLabel(workflow)}</option>)}</select></Field><Field label="Session 이름"><input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="시장 분석 세션" /></Field><div className="field button-field"><span>&nbsp;</span><Button onClick={createSession}>새 Session</Button></div></div></Card>
+      <Card title="2. Initial Run"><Field label="사용자 요청"><textarea rows="6" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="첨부 자료를 분석하고 핵심 결론을 검토해줘." /></Field><Field label="실행 파일" hint="LLM 실행 전에 로컬 저장소에 먼저 영구 기록되며, Target 미지정 시 전체 Workflow에서 참조할 수 있습니다."><input type="file" multiple onChange={(e) => setInitialFiles([...e.target.files])} /></Field><small>{initialFiles.length ? `${initialFiles.length}개 파일 선택됨` : '파일 첨부는 선택입니다.'}</small><Button disabled={busy || !sessionId} onClick={start}>{busy ? '실행 중…' : 'Run 시작'}</Button></Card>
       {run && <Card title="3. Active / Latest Run" meta={`${run.run.id} · ${formatTime(run.run.updated_at)}`} actions={<StatusPill value={status} />}>
         <div className="metric-row"><div><span>Current stage</span><strong>{state.current_stage || '—'}</strong></div><div><span>Thread</span><strong>{run.thread_id}</strong></div><div><span>Checkpoints</span><strong>{history.length}</strong></div><div><span>Session files</span><strong>{sessionData.files.length}</strong></div></div>
         {status === 'WAITING_FOR_USER' && <div className="action-box warning"><h4>Agent가 사용자 입력을 기다립니다</h4><p>{state.interrupt_prompt || state.question || '응답을 입력한 뒤 Resume 하세요.'}</p><textarea rows="3" value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder="답변" /><Button disabled={busy || !answer.trim()} onClick={() => resume('user')}>같은 Run에서 Resume</Button></div>}
         {status === 'PAUSED' && <div className="action-box danger-box"><h4>오류로 일시정지됨</h4><p>{state.error_message || '문제를 확인한 뒤 수동으로 재개할 수 있습니다.'}</p><Button disabled={busy} onClick={() => resume('error')}>Manual Resume</Button></div>}
-        {status === 'COMPLETED' && <div className="action-box"><h4>Manager 결과 후 Follow-up</h4>{revision && <div className="result"><span>Revision v{revision.version || revision.revision}</span><p>{revision.final_output || revision.output || 'Revision output saved.'}</p></div>}<textarea rows="4" value={followUp} onChange={(e) => setFollowUp(e.target.value)} placeholder="예: 3번 문항을 첨부 실험결과 기준으로 수정해줘." /><input type="file" multiple onChange={(e) => setFollowFiles([...e.target.files])} /><small>{followFiles.length ? `${followFiles.length}개 파일 선택됨 · 이번 Follow-up에만 사용` : '첨부파일은 기본 Turn-scoped이며 영구 RAG로 승격되지 않습니다.'}</small><Button disabled={busy || !followUp.trim()} onClick={submitFollowUp}>Continuation Run 생성</Button></div>}
+        {status === 'COMPLETED' && <div className="action-box"><h4>Manager 결과 후 Follow-up</h4>{revision && <div className="result"><span>Revision v{revision.version || revision.revision}</span><p>{revision.final_output || revision.output || 'Revision output saved.'}</p></div>}<textarea rows="4" value={followUp} onChange={(e) => setFollowUp(e.target.value)} placeholder="예: 결론의 근거를 첨부 자료 기준으로 다시 검토해줘." /><input type="file" multiple onChange={(e) => setFollowFiles([...e.target.files])} /><small>{followFiles.length ? `${followFiles.length}개 파일 선택됨 · 이번 Follow-up에만 사용` : '첨부파일은 기본 Turn-scoped이며 영구 RAG로 승격되지 않습니다.'}</small><Button disabled={busy || !followUp.trim()} onClick={submitFollowUp}>Continuation Run 생성</Button></div>}
       </Card>}
     </div>
     <aside className="timeline panel"><div className="panel-title"><h3>Session timeline</h3><Button tone="ghost" onClick={() => loadSession()}>새로고침</Button></div>{sessionData.runs.length ? [...sessionData.runs].reverse().map((item) => <button className={`timeline-item ${run?.run?.id === item.id ? 'selected' : ''}`} key={item.id} onClick={() => loadRun(item.id)}><div><strong>{item.kind || 'Run'}</strong><small>{item.id}</small></div><StatusPill value={item.status} /></button>) : <Empty title="Run 이력 없음" body="Initial Run을 시작하면 여기에 기록됩니다." />}</aside>
@@ -215,7 +246,7 @@ function HistoryPage({ api, sessions, notify }) {
   </div>
 }
 
-function SettingsPage({ api, apiBase, onSave, health, notify, onChanged }) {
+function SettingsPage({ api, apiBase, onSave, onReset, health, notify, onChanged }) {
   const [value, setValue] = useState(apiBase)
   const [status, setStatus] = useState(null)
   const [workspaceFile, setWorkspaceFile] = useState(null)
@@ -224,6 +255,7 @@ function SettingsPage({ api, apiBase, onSave, health, notify, onChanged }) {
   const [report, setReport] = useState(null)
   const [busy, setBusy] = useState(false)
 
+  useEffect(() => { setValue(apiBase) }, [apiBase])
   const refreshStatus = async () => {
     try { setStatus(await api.maintenance.status()) } catch (error) { notify(error.message, 'error') }
   }
@@ -242,8 +274,9 @@ function SettingsPage({ api, apiBase, onSave, health, notify, onChanged }) {
     if (!confirm('DB에서 참조되지 않는 로컬 파일만 삭제합니다. 계속할까요?')) return
     execute(() => api.maintenance.cleanup(true), '미참조 파일 정리를 완료했습니다.')
   }
+  const connectionLabel = health === 'ok' ? 'CONNECTED' : health === 'checking' ? 'CHECKING' : 'DISCONNECTED'
   return <div className="settings-wrap"><div className="section-title"><div><span className="eyebrow">LOCAL SETTINGS</span><h2>Settings</h2><p>연결, legacy migration, backup, cleanup을 관리합니다. Secret은 브라우저에 저장하지 않습니다.</p></div></div>
-    <Card title="Backend connection" actions={<StatusPill value={health === 'ok' ? 'CONNECTED' : 'DISCONNECTED'} />}><Field label="API Base URL" hint="브라우저 개발은 /api, Tauri Desktop은 기본적으로 127.0.0.1:8765/api를 사용합니다."><input value={value} onChange={(e) => setValue(e.target.value)} placeholder="/api" /></Field><Button onClick={() => onSave(value)}>저장 및 재연결</Button>{status && <div className="metric-row"><div><span>Version</span><strong>{status.version}</strong></div><div><span>Schema</span><strong>{status.schema_version}</strong></div><div><span>Active runs</span><strong>{status.active_runs?.length || 0}</strong></div></div>}</Card>
+    <Card title="Backend connection" actions={<StatusPill value={connectionLabel} />}><Field label="API Base URL" hint="브라우저 개발 기본값은 /api, Tauri Desktop은 http://127.0.0.1:8765/api입니다. 로컬 8765 주소에서 /api를 빠뜨리면 자동 보정합니다."><input value={value} onChange={(e) => setValue(e.target.value)} placeholder="/api" /></Field><div className="row"><Button onClick={() => onSave(value)}>저장 및 재연결</Button><Button tone="ghost" onClick={onReset}>기본값으로 재설정</Button></div>{health === 'down' && <div className="action-box danger-box"><h4>Mounted API 연결 실패</h4><p>root /health만 응답하는 경우도 Connected로 간주하지 않습니다. 기본값으로 재설정하거나 URL 끝에 /api가 포함됐는지 확인하세요.</p></div>}{status && <div className="metric-row"><div><span>Version</span><strong>{status.version}</strong></div><div><span>Schema</span><strong>{status.schema_version}</strong></div><div><span>Active runs</span><strong>{status.active_runs?.length || 0}</strong></div></div>}</Card>
     <Card title="Legacy Workspace import" meta="agent_workspace.zip · schema v1–v4"><Field label="Workspace ZIP" hint="Agent 설정, Linear/Hierarchical Workflow, RAG 원본, Notion source reference를 import합니다. 실행 이력과 secret은 legacy ZIP 대상이 아닙니다."><input type="file" accept=".zip,application/zip" onChange={(e) => setWorkspaceFile(e.target.files?.[0] || null)} /></Field><Field label="충돌 정책"><select value={conflictPolicy} onChange={(e) => setConflictPolicy(e.target.value)}><option value="fail">Fail — 기존 ID가 있으면 중단</option><option value="skip">Skip — 기존 항목 유지</option></select></Field><Button disabled={busy || !workspaceFile} onClick={() => execute(() => api.maintenance.importWorkspace(workspaceFile, conflictPolicy), 'Legacy Workspace import가 완료되었습니다.', true)}>Workspace Import</Button></Card>
     <Card title="Backup & recovery" meta="domain.sqlite + graph.sqlite + local files"><div className="row"><Button disabled={busy} onClick={() => execute(() => api.maintenance.backup(), '검증된 로컬 Backup을 생성했습니다.')}>Backup 생성</Button><Button tone="ghost" disabled={busy || !backupFile} onClick={() => execute(() => api.maintenance.validateBackup(backupFile), 'Backup 검증을 완료했습니다.')}>Backup 검증</Button></div><Field label="검증할 Backup ZIP" hint="Restore는 실행 중 데이터 변경을 막기 위해 offline CLI에서만 허용합니다."><input type="file" accept=".zip,application/zip" onChange={(e) => setBackupFile(e.target.files?.[0] || null)} /></Field><p><code>python scripts/restore_backup.py &lt;backup.zip&gt; --overwrite</code></p></Card>
     <Card title="Local file cleanup" meta="Dry-run first"><p>Source, Message attachment, Run execution file로 참조되는 데이터는 삭제하지 않습니다. DB에서 참조되지 않는 파일만 후보가 됩니다.</p><div className="row"><Button tone="ghost" disabled={busy} onClick={() => execute(() => api.maintenance.cleanup(false), 'Cleanup 후보를 확인했습니다.')}>Dry-run</Button><Button tone="danger" disabled={busy} onClick={applyCleanup}>미참조 파일 삭제</Button></div></Card>
@@ -266,18 +299,36 @@ export default function App() {
   const refreshWorkflows = async () => setWorkflows(await api.workflows.list())
   const refreshSessions = async () => setSessions(await api.sessions.list())
   const hydrate = async () => {
-    try { await api.health(); setHealth('ok'); const [agentItems, workflowItems, sessionItems] = await Promise.all([api.agents.list(), api.workflows.list(), api.sessions.list()]); setAgents(agentItems); setWorkflows(workflowItems); setSessions(sessionItems) } catch { setHealth('down') }
+    setHealth('checking')
+    try {
+      const snapshot = await api.probe()
+      setAgents(snapshot.agents)
+      setWorkflows(snapshot.workflows)
+      setSessions(snapshot.sessions)
+      setHealth('ok')
+    } catch {
+      setHealth('down')
+    }
   }
   useEffect(() => { hydrate() }, [api])
-  const saveBase = (value) => { const saved = saveApiBase(value); setApiBase(saved); notify('API 연결 설정을 저장했습니다.') }
+  const saveBase = (value) => {
+    const saved = saveApiBase(value)
+    setApiBase(saved)
+    notify(saved !== String(value || '').trim().replace(/\/+$/, '') ? `API Base를 ${saved}로 보정해 저장했습니다.` : 'API 연결 설정을 저장했습니다.')
+  }
+  const resetBase = () => {
+    const saved = saveApiBase(defaultApiBase(globalThis))
+    setApiBase(saved)
+    notify(`API Base를 기본값 ${saved}로 재설정했습니다.`)
+  }
   return <div className="app-shell">
     <aside className="sidebar"><div className="brand"><div className="brand-mark">AW</div><div><strong>Agent Workflow</strong><span>Studio 2.0</span></div></div><nav>{navItems.map(([id, label]) => <button className={page === id ? 'active' : ''} key={id} onClick={() => setPage(id)}>{label}</button>)}</nav><div className="backend-state"><span className={`dot ${health}`}></span><div><strong>Local Backend</strong><small>{health === 'ok' ? 'Connected' : health === 'checking' ? 'Checking…' : 'Disconnected'}</small></div></div></aside>
-    <main className="content"><header className="topbar"><div><strong>Agent Workflow Studio</strong><span>Local-first · Durable · Single active run</span></div><Button tone="ghost" onClick={hydrate}>Sync</Button></header><div className="page">
+    <main className="content"><header className="topbar"><div><strong>Agent Workflow Studio</strong><span>Local-first · Durable · Generic-first · Single active run</span></div><Button tone="ghost" onClick={hydrate}>Sync</Button></header><div className="page">
       {page === 'run' && <RunStudio api={api} workflows={workflows} sessions={sessions} onRefreshSessions={refreshSessions} notify={notify} />}
       {page === 'agents' && <AgentsPage api={api} agents={agents} refresh={refreshAgents} notify={notify} />}
       {page === 'workflows' && <WorkflowsPage api={api} agents={agents} workflows={workflows} refresh={refreshWorkflows} notify={notify} />}
       {page === 'history' && <HistoryPage api={api} sessions={sessions} notify={notify} />}
-      {page === 'settings' && <SettingsPage api={api} apiBase={apiBase} onSave={saveBase} health={health} notify={notify} onChanged={hydrate} />}
+      {page === 'settings' && <SettingsPage api={api} apiBase={apiBase} onSave={saveBase} onReset={resetBase} health={health} notify={notify} onChanged={hydrate} />}
     </div></main>
     {toast && <div className={`toast ${toast.tone}`}>{toast.message}</div>}
   </div>
