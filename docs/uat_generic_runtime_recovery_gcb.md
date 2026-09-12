@@ -89,8 +89,7 @@ The product is a general-purpose, local-first Multi-Agent Workflow Studio. Domai
 - [x] Dedicated R5 recovery acceptance PASS.
 - [x] 108 Python unit/boundary tests PASS.
 - [x] UI/Vitest 11 tests + production build PASS.
-- [x] Final branch-head push run `34667988572`: `unit-tests` SUCCESS + `local-ui` SUCCESS.
-- [x] Final branch-head PR run `34667991833`: `unit-tests` SUCCESS + `local-ui` SUCCESS.
+- [x] Final head PR CI run `34668060504`: `unit-tests` SUCCESS + `local-ui` SUCCESS, including explicit R5 recovery gate.
 - [x] **R5 FINAL PRD compliance = PASS.**
 
 ### R5 PRD compliance review
