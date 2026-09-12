@@ -90,6 +90,27 @@ class R3ApiRouterTests(unittest.TestCase):
         artifacts = self.client.get("/sessions/generic-session/artifacts").json()
         self.assertEqual({item["metadata"]["worker_id"] for item in artifacts}, {"research-slot", "review-slot"})
 
+    def test_generic_initial_file_route_uses_stored_policy(self) -> None:
+        self.assertEqual(self.client.post("/agents", json={"id": "worker", "name": "Plain Worker", "model": "fake"}).status_code, 201)
+        workflow = self.client.post("/workflows", json={
+            "id": "generic-linear",
+            "name": "Generic Linear",
+            "mode": "linear",
+            "steps": [{"step_id": "step-1", "agent_id": "worker"}],
+        })
+        self.assertEqual(workflow.status_code, 201, workflow.text)
+        self.assertIsNone(workflow.json()["policy_id"])
+        self.assertEqual(self.client.post("/sessions", json={"id": "generic-file-session", "workflow_id": "generic-linear"}).status_code, 201)
+        result = self.client.post(
+            "/runs/with-files",
+            data={"session_id": "generic-file-session", "user_request": "Use the uploaded evidence."},
+            files={"files": ("evidence.txt", b"GENERIC FILE EVIDENCE", "text/plain")},
+        )
+        self.assertEqual(result.status_code, 201, result.text)
+        self.assertEqual(result.json()["status"], "COMPLETED")
+        self.assertEqual(result.json()["revision"]["final_output"], "WORKER OUTPUT")
+        self.assertTrue(any("GENERIC FILE EVIDENCE" in call["input_text"] for call in self.provider.calls))
+
     def test_career_policy_uses_explicit_slot_roles_not_agent_names(self) -> None:
         self.assertEqual(self.client.post("/agents", json={"id": "cm", "name": "Editor Manager", "model": "fake"}).status_code, 201)
         names = ["Evidence", "Company Analyst", "Strategist", "Writer", "Fact Checker", "Reader"]
@@ -119,6 +140,12 @@ class R3ApiRouterTests(unittest.TestCase):
         response = self.client.post("/runs", json={"session_id": "s", "user_request": "x", "policy": "career_cover_letter"})
         self.assertEqual(response.status_code, 409)
         self.assertIn("stored=generic", response.text)
+        file_response = self.client.post(
+            "/runs/with-files",
+            data={"session_id": "s", "user_request": "x", "policy": "career_cover_letter"},
+        )
+        self.assertEqual(file_response.status_code, 409)
+        self.assertIn("stored=generic", file_response.text)
 
 
 if __name__ == "__main__":
