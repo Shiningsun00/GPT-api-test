@@ -173,13 +173,23 @@ class Workflow(Serializable):
     steps: list[LinearStep] = field(default_factory=list)
     include_original_prompt: bool = True
     hierarchy: HierarchyConfig | None = None
+    policy_id: str | None = None
+    policy_config: Mapping[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
+
+    def __post_init__(self) -> None:
+        if self.policy_id is not None:
+            normalized = str(self.policy_id).strip()
+            self.policy_id = normalized or None
+        if not isinstance(self.policy_config, Mapping):
+            raise TypeError("workflow policy_config must be a mapping")
+        self.policy_config = dict(self.policy_config)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "Workflow":
         hierarchy = data.get("hierarchy")
-        return cls(id=str(data["id"]), name=str(data["name"]), mode=WorkflowMode(data.get("mode", WorkflowMode.LINEAR.value)), steps=[LinearStep.from_dict(item) for item in data.get("steps", [])], include_original_prompt=bool(data.get("include_original_prompt", True)), hierarchy=HierarchyConfig.from_dict(hierarchy) if hierarchy else None, created_at=_dt(data.get("created_at")) or utc_now(), updated_at=_dt(data.get("updated_at")) or utc_now())
+        return cls(id=str(data["id"]), name=str(data["name"]), mode=WorkflowMode(data.get("mode", WorkflowMode.LINEAR.value)), steps=[LinearStep.from_dict(item) for item in data.get("steps", [])], include_original_prompt=bool(data.get("include_original_prompt", True)), hierarchy=HierarchyConfig.from_dict(hierarchy) if hierarchy else None, policy_id=data.get("policy_id") or None, policy_config=dict(data.get("policy_config") or {}), created_at=_dt(data.get("created_at")) or utc_now(), updated_at=_dt(data.get("updated_at")) or utc_now())
 
 
 @dataclass(slots=True)

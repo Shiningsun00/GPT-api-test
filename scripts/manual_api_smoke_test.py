@@ -44,16 +44,19 @@ def main() -> int:
             assert client.get("/openapi.json").status_code == 200
             print("      PASS")
 
-            print("[2/4] Seed Manager/W1-W6 + workflow/session")
+            print("[2/4] Seed explicit Career policy + slot roles")
             assert client.post("/agents", json={"id": "manager", "name": "Manager", "model": "fake"}).status_code == 201
+            names = ["Evidence Intake", "Role Analyst", "Strategy Designer", "Draft Writer", "Fact Reviewer", "Recruiter Reviewer"]
             for i in range(1, 7):
-                assert client.post("/agents", json={"id": f"agent-w{i}", "name": f"W{i} worker", "model": "fake"}).status_code == 201
+                assert client.post("/agents", json={"id": f"agent-w{i}", "name": names[i - 1], "model": "fake", "system_prompt": f"W{i} prompt"}).status_code == 201
             assert client.post(
                 "/workflows",
                 json={
                     "id": "career",
                     "name": "Career",
                     "mode": "hierarchical",
+                    "policy_id": "career_cover_letter",
+                    "policy_config": {"slot_roles": {f"slot-w{i}": f"W{i}" for i in range(1, 7)}},
                     "hierarchy": {
                         "manager_agent_id": "manager",
                         "workers": [{"worker_id": f"slot-w{i}", "agent_id": f"agent-w{i}"} for i in range(1, 7)],
@@ -63,14 +66,14 @@ def main() -> int:
             assert client.post("/sessions", json={"id": "session-1", "workflow_id": "career"}).status_code == 201
             print("      PASS")
 
-            print("[3/4] Initial Career Run")
+            print("[3/4] Initial Career Run resolved from stored Workflow policy")
             first = client.post("/runs", json={"id": "run-1", "session_id": "session-1", "user_request": "Write a verified draft."})
             assert first.status_code == 201, first.text
             assert first.json()["status"] == "COMPLETED"
             assert first.json()["revision"]["version"] == 1
             print("      PASS")
 
-            print("[4/4] Follow-up + file -> Continuation Run")
+            print("[4/4] Follow-up + file -> policy-aware Continuation Run")
             follow = client.post(
                 "/sessions/session-1/messages",
                 data={"previous_run_id": "run-1", "content": "Revise with this evidence."},

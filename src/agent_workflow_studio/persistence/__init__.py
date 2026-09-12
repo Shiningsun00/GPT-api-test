@@ -9,10 +9,10 @@ from .errors import (
 from .files import LocalFileStore, StoredFile
 from .interfaces import Repository
 from .memory import InMemoryRepository
+from .policy_sqlite import SQLitePersistence
 from .records import ExecutionEvent, ExternalThreadLink
 from .schema import CURRENT_SCHEMA_VERSION, REQUIRED_TABLES
 from .services import DurableWorkflowService, PendingAttachment, PersistedFollowUp
-from .sqlite import SQLitePersistence
 
 __all__ = [
     "CURRENT_SCHEMA_VERSION",

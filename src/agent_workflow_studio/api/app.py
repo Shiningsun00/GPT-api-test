@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from agent_workflow_studio.core.models import Agent, RunStatus, Workflow, WorkflowMode, utc_now
 from agent_workflow_studio.core.workflow import new_initial_run, new_session, validate_workflow
-from agent_workflow_studio.graph import SQLiteGraphCheckpointer
+from agent_workflow_studio.graph import GenericWorkflowError, GenericWorkflowRuntime, SQLiteGraphCheckpointer
 from agent_workflow_studio.integrations.notion import NotionClient, NotionConfig
 from agent_workflow_studio.integrations.notion_workflow import NotionReferenceContextProvider
 from agent_workflow_studio.integrations.openai_client import OpenAIModelProvider
@@ -95,6 +95,8 @@ class WorkflowPayload(BaseModel):
     include_original_prompt: bool = True
     steps: list[dict[str, Any]] = Field(default_factory=list)
     hierarchy: dict[str, Any] | None = None
+    policy_id: str | None = None
+    policy_config: dict[str, Any] = Field(default_factory=dict)
 
 
 class SessionPayload(BaseModel):
@@ -106,8 +108,8 @@ class SessionPayload(BaseModel):
 class RunPayload(BaseModel):
     session_id: str
     user_request: str
-    policy: str = "career_cover_letter"
     id: str | None = None
+    policy: str | None = None
 
 
 class ResumePayload(BaseModel):
@@ -129,18 +131,38 @@ def _not_found(kind: str, entity_id: str) -> HTTPException:
     return HTTPException(status_code=404, detail=f"{kind} not found: {entity_id}")
 
 
-def _runtime_for_workflow(context: BackendContext, workflow: Workflow) -> CareerWorkflowRuntime:
+def _workflow_policy_label(workflow: Workflow) -> str:
+    return workflow.policy_id or "generic"
+
+
+def _runtime_for_workflow(context: BackendContext, workflow: Workflow):
     try:
-        return CareerWorkflowRuntime(
-            workflow=workflow,
-            persistence=context.persistence,
-            checkpointer=context.checkpointer,
-            provider=context.provider,
-            file_store=context.file_store,
-            reference_context_provider=context.reference_context_provider,
-        )
-    except (CareerWorkflowError, PersistenceError, PersistenceConflictError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if workflow.policy_id is None:
+            return GenericWorkflowRuntime(
+                workflow=workflow,
+                persistence=context.persistence,
+                checkpointer=context.checkpointer,
+                provider=context.provider,
+                file_store=context.file_store,
+                reference_context_provider=context.reference_context_provider,
+            )
+        if workflow.policy_id == "career_cover_letter":
+            return CareerWorkflowRuntime(
+                workflow=workflow,
+                persistence=context.persistence,
+                checkpointer=context.checkpointer,
+                provider=context.provider,
+                file_store=context.file_store,
+                reference_context_provider=context.reference_context_provider,
+            )
+        raise HTTPException(status_code=422, detail=f"unsupported workflow policy: {workflow.policy_id}")
+    except HTTPException:
+        raise
+    except (GenericWorkflowError, CareerWorkflowError, PersistenceError, PersistenceConflictError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"policy": _workflow_policy_label(workflow), "message": str(exc)},
+        ) from exc
 
 
 def _workflow_for_session(context: BackendContext, session_id: str) -> tuple[Any, Workflow]:
@@ -153,7 +175,7 @@ def _workflow_for_session(context: BackendContext, session_id: str) -> tuple[Any
     return session, workflow
 
 
-def _runtime_for_run(context: BackendContext, run_id: str) -> CareerWorkflowRuntime:
+def _runtime_for_run(context: BackendContext, run_id: str):
     run = context.persistence.runs.get(run_id)
     if run is None:
         raise _not_found("run", run_id)
@@ -182,7 +204,7 @@ def _graph_result_payload(outcome: Any) -> dict[str, Any]:
 
 def create_app(context: BackendContext | None = None) -> FastAPI:
     ctx = context or BackendContext.local()
-    app = FastAPI(title="Agent Workflow Studio API", version="2.0-step8")
+    app = FastAPI(title="Agent Workflow Studio API", version="2.0-r3")
     app.state.backend = ctx
 
     if ctx.owns_resources:
@@ -206,7 +228,13 @@ def create_app(context: BackendContext | None = None) -> FastAPI:
     async def _career_error(_, exc: CareerWorkflowError):
         from fastapi.responses import JSONResponse
 
-        return JSONResponse(status_code=422, content={"detail": str(exc)})
+        return JSONResponse(status_code=422, content={"detail": {"policy": "career_cover_letter", "message": str(exc)}})
+
+    @app.exception_handler(GenericWorkflowError)
+    async def _generic_error(_, exc: GenericWorkflowError):
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=422, content={"detail": {"policy": "generic", "message": str(exc)}})
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -343,14 +371,18 @@ def create_app(context: BackendContext | None = None) -> FastAPI:
 
     @app.post("/runs", status_code=201)
     def start_run(payload: RunPayload) -> dict[str, Any]:
-        if payload.policy != "career_cover_letter":
-            raise HTTPException(status_code=422, detail=f"unsupported workflow policy: {payload.policy}")
         session, workflow = _workflow_for_session(ctx, payload.session_id)
+        stored_policy = _workflow_policy_label(workflow)
+        if payload.policy is not None and payload.policy != stored_policy:
+            raise HTTPException(
+                status_code=409,
+                detail=f"run policy override does not match stored workflow policy: requested={payload.policy}, stored={stored_policy}",
+            )
         if ctx.persistence.runs.list_active():
             raise HTTPException(status_code=409, detail="another active run already exists")
+        runtime = _runtime_for_workflow(ctx, workflow)
         run = new_initial_run(session, run_id=payload.id)
         ctx.persistence.runs.save(run)
-        runtime = _runtime_for_workflow(ctx, workflow)
         try:
             outcome = runtime.start_initial(run, user_request=payload.user_request)
         except Exception:
@@ -411,6 +443,11 @@ def create_app(context: BackendContext | None = None) -> FastAPI:
         files: Sequence[UploadFile] = File(default=()),
     ) -> dict[str, Any]:
         _, workflow = _workflow_for_session(ctx, session_id)
+        previous_run = ctx.persistence.runs.get(previous_run_id)
+        if previous_run is None:
+            raise _not_found("run", previous_run_id)
+        if previous_run.workflow_id != workflow.id or previous_run.session_id != session_id:
+            raise HTTPException(status_code=409, detail="previous run does not belong to this workflow session")
         uploads: list[PendingAttachment] = []
         for upload in files:
             data = await upload.read()

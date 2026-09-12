@@ -34,18 +34,19 @@ def main() -> int:
         provider = DemoProvider()
 
         manager = Agent(id="manager", name="Manager", model="fake", system_prompt="MANAGER prompt")
-        workers = [Agent(id=f"w{i}", name=f"W{i} worker", model="fake", system_prompt=f"W{i} prompt") for i in range(1, 7)]
+        names = ["Evidence Intake", "Role Analyst", "Strategy Designer", "Draft Writer", "Fact Reviewer", "Recruiter Reviewer"]
+        workers = [Agent(id=f"w{i}", name=names[i - 1], model="fake", system_prompt=f"W{i} prompt") for i in range(1, 7)]
         persistence.agents.save(manager)
         for worker in workers:
             persistence.agents.save(worker)
+        slots = [WorkerSlot(worker_id=f"slot-{worker.id}", agent_id=worker.id) for worker in workers]
         workflow = Workflow(
             id="career",
             name="Career workflow",
             mode=WorkflowMode.HIERARCHICAL,
-            hierarchy=HierarchyConfig(
-                manager_agent_id=manager.id,
-                workers=[WorkerSlot(worker_id=f"slot-{worker.id}", agent_id=worker.id) for worker in workers],
-            ),
+            hierarchy=HierarchyConfig(manager_agent_id=manager.id, workers=slots),
+            policy_id="career_cover_letter",
+            policy_config={"slot_roles": {slot.worker_id: f"W{i}" for i, slot in enumerate(slots, 1)}},
         )
         persistence.workflows.save(workflow)
         session = new_session(workflow, session_id="career-session")
@@ -61,13 +62,13 @@ def main() -> int:
             file_store=file_store,
         )
 
-        print("[1/3] Initial W1-W6 career workflow")
+        print("[1/3] Initial explicit-role career workflow")
         first = runtime.start_initial(run, user_request="Create a cover letter from verified evidence")
         assert first.graph.completed
         assert tuple(first.graph.state["node_history"]) == CAREER_STAGE_ORDER
         assert first.revision and first.revision.version == 1
         assert len(persistence.artifacts.list(run_id=run.id)) == 8
-        print("      PASS: dependency-aware pipeline + immutable artifacts + Revision v1")
+        print("      PASS: slot-role bindings + dependency-aware pipeline + Revision v1")
 
         print("[2/3] Manager post-result follow-up + file")
         second = runtime.start_followup(

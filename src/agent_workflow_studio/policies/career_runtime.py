@@ -12,7 +12,7 @@ from agent_workflow_studio.graph import DurableGraphEngine, GraphRunResult, Stag
 from agent_workflow_studio.persistence import DurableWorkflowService, LocalFileStore, PendingAttachment, PersistedFollowUp, SQLitePersistence
 from agent_workflow_studio.retrieval.extractors import FilePayload, extract_text_from_file
 
-from .career_cover_letter import CAREER_REQUIRED_DEP_KINDS, ROLE_ALLOWED_KINDS, worker_role
+from .career_cover_letter import CAREER_REQUIRED_DEP_KINDS, ROLE_ALLOWED_KINDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +82,8 @@ ReferenceContextProvider = Callable[[Agent], str]
 
 
 def validate_career_registry(workflow: Workflow, persistence: SQLitePersistence) -> CareerRegistry:
+    if workflow.policy_id != "career_cover_letter":
+        raise CareerRegistryError("career runtime requires workflow.policy_id='career_cover_letter'")
     hierarchy = workflow.hierarchy
     if hierarchy is None:
         raise CareerRegistryError("career workflow requires a hierarchical workflow configuration")
@@ -90,17 +92,30 @@ def validate_career_registry(workflow: Workflow, persistence: SQLitePersistence)
     manager = persistence.agents.get(hierarchy.manager_agent_id)
     if manager is None:
         raise CareerRegistryError(f"manager agent not found: {hierarchy.manager_agent_id}")
+
+    raw_roles = workflow.policy_config.get("slot_roles", {})
+    if not isinstance(raw_roles, Mapping):
+        raise CareerRegistryError("career policy_config.slot_roles must be a mapping")
+    slot_roles = {str(key): str(value).strip().upper() for key, value in raw_roles.items()}
+    known_slots = {slot.worker_id for slot in hierarchy.workers}
+    unknown_slots = sorted(set(slot_roles) - known_slots)
+    if unknown_slots:
+        raise CareerRegistryError(f"career role binding references unknown worker slots: {', '.join(unknown_slots)}")
+
     workers: dict[str, Agent] = {}
     for slot in hierarchy.workers:
         agent = persistence.agents.get(slot.agent_id)
         if agent is None:
             raise CareerRegistryError(f"worker agent not found: {slot.agent_id}")
-        role = worker_role(agent.name)
+        role = slot_roles.get(slot.worker_id)
         if role is None:
             continue
+        if role not in ROLE_ALLOWED_KINDS:
+            raise CareerRegistryError(f"invalid career worker role for {slot.worker_id}: {role}")
         if role in workers:
             raise CareerRegistryError(f"duplicate career worker role: {role}")
         workers[role] = agent
+
     missing = sorted(set(ROLE_ALLOWED_KINDS) - set(workers))
     if missing:
         raise CareerRegistryError(f"missing career worker roles: {', '.join(missing)}")
@@ -275,7 +290,7 @@ class CareerStageHandler:
 
 
 class CareerWorkflowRuntime:
-    """STEP 4 application policy running on the generic durable graph engine."""
+    """Career Cover Letter policy runtime using explicit Workflow slot-role bindings."""
 
     def __init__(self, *, workflow: Workflow, persistence: SQLitePersistence, checkpointer, provider: ModelProvider, file_store: LocalFileStore | None = None, reference_context_provider: ReferenceContextProvider | None = None, hitl_hook: HitlHook | None = None) -> None:
         self.workflow = workflow

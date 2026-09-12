@@ -130,14 +130,23 @@ class Step9MaintenanceTests(unittest.TestCase):
 
     def _seed_career(self, client: TestClient) -> None:
         self.assertEqual(client.post("/agents", json={"id": "manager", "name": "Manager", "model": "fake"}).status_code, 201)
-        for i in range(1, 7):
-            self.assertEqual(client.post("/agents", json={"id": f"agent-w{i}", "name": f"W{i} worker", "model": "fake", "system_prompt": f"W{i} prompt"}).status_code, 201)
+        names = ["Evidence Intake", "Role Analyst", "Strategy Designer", "Draft Writer", "Fact Reviewer", "Recruiter Reviewer"]
+        for i, name in enumerate(names, 1):
+            self.assertEqual(
+                client.post(
+                    "/agents",
+                    json={"id": f"agent-w{i}", "name": name, "model": "fake", "system_prompt": f"W{i} prompt"},
+                ).status_code,
+                201,
+            )
         response = client.post(
             "/workflows",
             json={
                 "id": "career",
                 "name": "Career",
                 "mode": "hierarchical",
+                "policy_id": "career_cover_letter",
+                "policy_config": {"slot_roles": {f"slot-w{i}": f"W{i}" for i in range(1, 7)}},
                 "hierarchy": {
                     "manager_agent_id": "manager",
                     "workers": [{"worker_id": f"slot-w{i}", "agent_id": f"agent-w{i}"} for i in range(1, 7)],
