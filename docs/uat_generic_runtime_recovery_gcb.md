@@ -35,9 +35,6 @@ These are re-checked at every checkpoint:
 # Multi-turn Recovery Plan
 
 ## R0 — Gap Freeze / Architecture Decision — PASS
-### Goal
-Freeze the exact PRD mismatch and decide the smallest correction architecture before implementation.
-
 ### Approved decisions
 - `Workflow.policy_id=None` = Generic; `career_cover_letter` is explicit.
 - Policy-specific role binding lives at Workflow/WorkerSlot level, not Agent name.
@@ -55,10 +52,6 @@ Freeze the exact PRD mismatch and decide the smallest correction architecture be
 - [x] PRD compliance review = PASS.
 
 ## R1 — Domain / Persistence Policy Separation — PASS
-### Goal
-Represent Generic vs domain Policy/Template explicitly in durable Workflow configuration.
-
-### Gate
 - [x] Durable Workflow policy/template representation.
 - [x] Generic default for new Workflows.
 - [x] Policy-specific role bindings at Workflow/slot level.
@@ -69,21 +62,6 @@ Represent Generic vs domain Policy/Template explicitly in durable Workflow confi
 - [x] PRD compliance review = PASS.
 
 ## R2 — Generic Runtime — PASS
-### Goal
-Allow arbitrary user-defined Linear and Hierarchical workflows to execute without Career W1–W6 requirements.
-
-### Implemented behavior
-- `GenericWorkflowRuntime` runs only Generic (`policy_id=None`) Workflows and never infers behavior from Agent names.
-- Generic Linear executes arbitrary ordered Agents using saved Step IDs/additional prompts and persists immutable Artifacts + Revision.
-- Generic Hierarchical uses LangGraph Manager → WorkerSlot(s) / Human Input / Final routing.
-- WorkerSlot ID is the routing identity; the same Agent may occupy multiple distinct WorkerSlots.
-- Manager/Worker artifacts are passed as data context, never promoted to system instructions.
-- Initial execution-file routing and turn-scoped follow-up attachments are preserved.
-- Manager-requested HITL resumes the same Run/thread.
-- Worker failure pauses the Run; Manual Resume continues from the failed node without replaying the completed Manager decision.
-- Completed-result follow-up is durably saved first, creates a new Continuation Run, and appends Revision vN+1.
-
-### Gate
 - [x] Generic Linear arbitrary Agents PASS.
 - [x] Generic Hierarchical Manager + N Workers PASS, including N=2.
 - [x] Arbitrary Agent names PASS.
@@ -96,21 +74,6 @@ Allow arbitrary user-defined Linear and Hierarchical workflows to execute withou
 - [x] PRD compliance review = PASS.
 
 ## R3 — Runtime Router / FastAPI — PASS
-### Goal
-Route each Run through the runtime selected by the durable Workflow policy rather than hard-wiring Career.
-
-### Implemented behavior
-- FastAPI resolves execution policy from persisted `Workflow.policy_id`; Generic (`None`) and `career_cover_letter` select different runtimes.
-- `RunPayload.policy` is no longer a Career default. When supplied only as a compatibility hint, it cannot override the stored Workflow policy; mismatch returns 409.
-- `/runs/with-files` follows the same stored-policy rule and supports Generic initial execution files rather than forcing Career.
-- `/runs/{id}`, history, Resume, and Session follow-up resolve the runtime from the persisted Run/Workflow relationship.
-- Follow-up validates that `previous_run_id` belongs to the same Workflow Session before starting a Continuation Run.
-- Career runtime now resolves W1–W6 exclusively from `Workflow.policy_config.slot_roles[worker_id]`; Agent names are not role identifiers.
-- Career execution-file target matching includes the explicit WorkerSlot binding while preserving stage/role/Agent targets.
-- Generic and Career runtime/configuration errors are normalized with policy-specific error context.
-- Existing STEP 9 initial-file API and fixtures were migrated to explicit Career policy semantics; Generic remains the default when no policy is selected.
-
-### Gate
 - [x] Run start resolves Workflow policy.
 - [x] Generic Workflow → Generic runtime.
 - [x] Career Workflow → Career runtime.
@@ -128,25 +91,7 @@ Route each Run through the runtime selected by the durable Workflow policy rathe
 - [x] React UI tests/build PASS.
 - [x] PRD compliance review = PASS.
 
-### R3 PRD compliance review
-R3 restores the FastAPI service boundary required by FR-14 without coupling Generic execution to the Career template. Generic Linear/Hierarchical behavior remains the default capability; Career W1–W6 remains an explicit domain policy. Session/Run, same-Run HITL Resume, Continuation Run follow-up, file durability, immutable Artifact/Revision, and manual-recovery invariants remain intact. No new Product Decision outside approved PRD v1.0 was introduced.
-
 ## R4 — Local UI / Template UX — PASS
-### Goal
-Make the generic-first model obvious and prevent the UI from implying Career-specific naming rules for normal Agents.
-
-### Implemented behavior
-- Workflow form exposes `Generic` and `Career Cover Letter` policy/template selection, with Generic as the default.
-- Agent examples are domain-neutral (`Researcher`, `research-agent`) and Agent identity remains independent from Workflow role.
-- Career selection forces Hierarchical mode and reveals WorkerSlot-level W1–W6 role selectors only for that policy.
-- Career role mapping is serialized to `policy_config.slot_roles[worker_id]`; Agent names are never used as Career role identifiers.
-- Missing, duplicate, invalid Career roles and duplicate Step/Worker Slot IDs are rejected before save.
-- Generic Manager + arbitrary Worker 2명 form payload is covered by UI contract tests and routes through the already-passing R3 Generic API E2E path.
-- Run Studio no longer sends a Career default policy; Session Workflow labels expose Generic vs Career explicitly.
-- Issue #21 connection UX is corrected: the known local backend root without `/api` is auto-repaired, connection health probes mounted API resources before showing Connected, and Settings provides a one-click default reset plus clear recovery guidance.
-- Career role layout is responsive without adding a Visual Node Editor or new product scope.
-
-### Gate
 - [x] Workflow form exposes Generic vs Career policy/template selection.
 - [x] Generic is the default.
 - [x] Agent name examples are domain-neutral.
@@ -157,16 +102,9 @@ Make the generic-first model obvious and prevent the UI from implying Career-spe
 - [x] 11 React/Vitest UI contract tests PASS.
 - [x] Vite production build PASS.
 - [x] 108 Python unit/boundary tests + STEP 3/R2/STEP 4/5/7/8/9 smokes + Final Acceptance 1–19 PASS.
-- [x] Latest branch-head CI: `local-ui` SUCCESS, `unit-tests` SUCCESS.
 - [x] PRD compliance review = PASS.
 
-### R4 PRD compliance review
-R4 aligns the Local UI with PRD P4/FR-01/FR-04/FR-05/FR-14/FR-15: reusable Agents remain domain-agnostic, Generic Workflow creation is the default path, and Career-only W1–W6 semantics are visible only when the explicit Career policy is selected. The API connection fix also prevents root `/health` from masking an invalid mounted API base. No Graph editor, marketplace, multi-user, or secret-entry scope was introduced.
-
 ## R5 — Regression / UAT Merge Gate — PASS
-### Goal
-Prove that restoring Generic execution did not break Career or the cross-cutting durability, recovery, integration, and local-first guarantees required by the approved PRD.
-
 ### Final gate
 - [x] Generic Hierarchical Manager + 2 arbitrary Workers → Final PASS.
 - [x] Generic Linear 2+ arbitrary Agents → Final PASS.
@@ -187,14 +125,14 @@ Prove that restoring Generic execution did not break Career or the cross-cutting
 - [x] 108 Python unit/boundary tests PASS.
 - [x] UI/Vitest 11 tests PASS.
 - [x] Vite production build PASS.
-- [x] Latest branch-head GitHub Actions: `unit-tests` SUCCESS, `local-ui` SUCCESS.
+- [x] Latest branch-head GitHub Actions run `34667813793`: `unit-tests` SUCCESS, `local-ui` SUCCESS.
 - [x] **R5 FINAL PRD compliance = PASS.**
 
 ### R5 PRD compliance review
 The recovery branch was re-checked against approved PRD v1.0 Product Vision, P1–P8, FR-01/04/05/06/07/08/09/10/11/12/14/15, Career Policy invariants, NFR-01/02/04/05/07/08, D-01/03/04/05/06/07/08/09/10, and C-01. The correction restores the generic-first architecture rather than changing product scope: domain policy remains separated from Core, Agents remain reusable, local persistence/checkpoints remain authoritative, terminal Runs are not reactivated, follow-up files remain turn-scoped, and external integrations keep their existing safety boundaries. No new Product Decision outside PRD v1.0 was required by R5.
 
 ### R5 validation evidence
-- GitHub Actions branch-head run includes an explicit `Run R5 recovery acceptance gate` step and it completed successfully.
+- GitHub Actions branch-head run `34667813793` includes an explicit `Run R5 recovery acceptance gate` step and it completed successfully.
 - The R5 gate reruns the complete 108-test Python suite, Generic runtime smoke, and the established product acceptance/recovery/integration suites.
 - The independent Local UI job reruns Vitest and production Vite build.
 - CI uses deterministic fakes/adapters and intentionally does not start credentialed live OpenAI/Discord/Notion work automatically; live credential checks remain local UAT and are not required to merge this code-only recovery branch.
