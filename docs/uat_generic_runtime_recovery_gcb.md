@@ -1,6 +1,6 @@
 # Agent Workflow Studio 2.0 — Generic Runtime Recovery GCB
 
-Status: ACTIVE UAT CORRECTION TRACK
+Status: R0–R5 PASS / AWAITING MERGE APPROVAL
 
 ## Source of Truth
 1. `docs/PRD.md` — APPROVED v1.0 (highest priority)
@@ -136,7 +136,7 @@ R3 restores the FastAPI service boundary required by FR-14 without coupling Gene
 Make the generic-first model obvious and prevent the UI from implying Career-specific naming rules for normal Agents.
 
 ### Implemented behavior
-- Workflow form now exposes `Generic` and `Career Cover Letter` policy/template selection, with Generic as the default.
+- Workflow form exposes `Generic` and `Career Cover Letter` policy/template selection, with Generic as the default.
 - Agent examples are domain-neutral (`Researcher`, `research-agent`) and Agent identity remains independent from Workflow role.
 - Career selection forces Hierarchical mode and reveals WorkerSlot-level W1–W6 role selectors only for that policy.
 - Career role mapping is serialized to `policy_config.slot_roles[worker_id]`; Agent names are never used as Career role identifiers.
@@ -163,23 +163,44 @@ Make the generic-first model obvious and prevent the UI from implying Career-spe
 ### R4 PRD compliance review
 R4 aligns the Local UI with PRD P4/FR-01/FR-04/FR-05/FR-14/FR-15: reusable Agents remain domain-agnostic, Generic Workflow creation is the default path, and Career-only W1–W6 semantics are visible only when the explicit Career policy is selected. The API connection fix also prevents root `/health` from masking an invalid mounted API base. No Graph editor, marketplace, multi-user, or secret-entry scope was introduced.
 
-## R5 — Regression / UAT Gate — PENDING
+## R5 — Regression / UAT Merge Gate — PASS
 ### Goal
-Prove that restoring Generic execution did not break Career or cross-cutting durability guarantees.
+Prove that restoring Generic execution did not break Career or the cross-cutting durability, recovery, integration, and local-first guarantees required by the approved PRD.
 
-### Required
-- Generic Hierarchical + Linear E2E.
-- No W1–W6 name dependency in Generic.
-- Duplicate Agent/distinct WorkerSlots.
-- Career explicit policy/role binding regression.
-- Initial file, HITL, Manual Resume, Continuation Run, immutable Artifact/Revision.
-- Discord/Notion policy-aware regressions.
-- Backup/import/recovery regression.
-- React tests/build.
-- Final UAT and PRD compliance review.
+### Final gate
+- [x] Generic Hierarchical Manager + 2 arbitrary Workers → Final PASS.
+- [x] Generic Linear 2+ arbitrary Agents → Final PASS.
+- [x] Generic execution has no W1–W6 Agent-name dependency.
+- [x] Duplicate Agent / distinct WorkerSlots regression PASS.
+- [x] Career template regression PASS with explicit WorkerSlot W1–W6 binding and arbitrary Agent names.
+- [x] Initial Run + execution file durability/routing PASS.
+- [x] Agent-requested HITL → same Run/thread Resume PASS.
+- [x] Worker failure → explicit Manual Resume without replaying completed work PASS.
+- [x] Completed result → Follow-up + file → Continuation Run + new Revision PASS.
+- [x] Restart/reopen leaves interrupted/paused Run waiting for explicit Resume; no automatic external/API work PASS.
+- [x] Artifact / Revision append-only and historical immutability PASS.
+- [x] Discord regression PASS (start/status/reply/resume/follow-up/attachment + allowlist/durable mapping coverage).
+- [x] Notion regression PASS (source/inbox/final write, idempotency and non-destructive write policy coverage).
+- [x] Backup / validate / import / restore / cleanup regression PASS.
+- [x] Existing Final Acceptance 1–19 PASS.
+- [x] Dedicated `manual_r5_recovery_acceptance.py` PASS.
+- [x] 108 Python unit/boundary tests PASS.
+- [x] UI/Vitest 11 tests PASS.
+- [x] Vite production build PASS.
+- [x] Latest branch-head GitHub Actions: `unit-tests` SUCCESS, `local-ui` SUCCESS.
+- [x] **R5 FINAL PRD compliance = PASS.**
+
+### R5 PRD compliance review
+The recovery branch was re-checked against approved PRD v1.0 Product Vision, P1–P8, FR-01/04/05/06/07/08/09/10/11/12/14/15, Career Policy invariants, NFR-01/02/04/05/07/08, D-01/03/04/05/06/07/08/09/10, and C-01. The correction restores the generic-first architecture rather than changing product scope: domain policy remains separated from Core, Agents remain reusable, local persistence/checkpoints remain authoritative, terminal Runs are not reactivated, follow-up files remain turn-scoped, and external integrations keep their existing safety boundaries. No new Product Decision outside PRD v1.0 was required by R5.
+
+### R5 validation evidence
+- GitHub Actions branch-head run includes an explicit `Run R5 recovery acceptance gate` step and it completed successfully.
+- The R5 gate reruns the complete 108-test Python suite, Generic runtime smoke, and the established product acceptance/recovery/integration suites.
+- The independent Local UI job reruns Vitest and production Vite build.
+- CI uses deterministic fakes/adapters and intentionally does not start credentialed live OpenAI/Discord/Notion work automatically; live credential checks remain local UAT and are not required to merge this code-only recovery branch.
 
 ## Merge rule
-No implementation PR is merged until R0–R5 relevant gates are checked and the final PRD compliance review is PASS. If a checkpoint exposes a new product decision not fixed by PRD v1.0, stop and ask the user before implementing that decision.
+R0→R5 are now all PASS. The implementation is merge-eligible only after the user explicitly authorizes merging PR #23. Do not merge on PASS alone.
 
 ## Current gate
-**R0 PASS → R1 PASS → R2 PASS → R3 PASS → R4 PASS → STOP. R5 implementation requires the next explicit user approval.**
+**R0 PASS → R1 PASS → R2 PASS → R3 PASS → R4 PASS → R5 PASS → AWAITING EXPLICIT USER MERGE APPROVAL.**
