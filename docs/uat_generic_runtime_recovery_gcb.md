@@ -14,7 +14,7 @@ If any implementation choice conflicts with the PRD, the PRD wins. A checkpoint 
 ## Problem Statement
 The product is defined as a general-purpose, local-first Multi-Agent Workflow Studio. Domain-specific workflows such as the Career Cover Letter W1–W6 flow must live in a Workflow Policy / Template layer rather than being hard-wired into the generic execution path.
 
-Current UAT found that the API run path defaults to / only accepts `career_cover_letter`, so an otherwise valid generic Hierarchical workflow such as Manager + 2 Workers is blocked by Career-specific W1–W6 validation. This correction track restores the generic-first architecture without deleting the Career policy.
+UAT found that the API run path defaulted to / only accepted `career_cover_letter`, so an otherwise valid generic Hierarchical workflow such as Manager + 2 Workers was blocked by Career-specific W1–W6 validation. This correction track restores the generic-first architecture without deleting the Career policy.
 
 ## Cross-cutting PRD invariants
 These are re-checked at every checkpoint:
@@ -82,40 +82,54 @@ Allow arbitrary user-defined Linear and Hierarchical workflows to execute withou
 - Manager-requested HITL resumes the same Run/thread.
 - Worker failure pauses the Run; Manual Resume continues from the failed node without replaying the completed Manager decision.
 - Completed-result follow-up is durably saved first, creates a new Continuation Run, and appends Revision vN+1.
-- R2 does not alter FastAPI/UI runtime selection; those are intentionally gated to R3/R4.
 
 ### Gate
-- [x] Generic Linear runtime works for arbitrary ordered Agents.
-- [x] Generic Hierarchical runtime works for Manager + N Workers, including N=2.
-- [x] Agent names are unrestricted in Generic runtime.
-- [x] Duplicate Agent in distinct WorkerSlots remains valid.
-- [x] Initial files and turn-scoped follow-up files are available according to routing semantics.
-- [x] HITL same-Run Resume remains valid.
-- [x] Error Manual Resume remains valid without replaying completed Manager work.
-- [x] Post-result follow-up creates a Continuation Run and new Revision.
-- [x] 102 Python tests PASS.
-- [x] R2 Generic runtime smoke PASS: Manager + arbitrary Worker 2명 Hierarchical; arbitrary Agent 2명 Linear.
-- [x] Existing STEP 3/4/5/7/8/9 smokes + Final Acceptance 1–19 PASS.
-- [x] React test/build PASS.
-- [x] PRD compliance review = PASS for R2 scope.
+- [x] Generic Linear arbitrary Agents PASS.
+- [x] Generic Hierarchical Manager + N Workers PASS, including N=2.
+- [x] Arbitrary Agent names PASS.
+- [x] Duplicate Agent / distinct WorkerSlot PASS.
+- [x] Initial / follow-up files semantics preserved.
+- [x] HITL same-Run Resume preserved.
+- [x] Error Manual Resume preserved.
+- [x] Completed result follow-up = Continuation Run preserved.
+- [x] 102 Python tests + R2 smoke + existing smokes/final acceptance + React test/build PASS.
+- [x] PRD compliance review = PASS.
 
-### Compliance note
-The Recovery track is not complete. The service boundary still hard-wires Career runtime and the legacy Career runtime still resolves W1–W6 from Agent names. These known violations are explicitly reserved for R3 and are not accepted as final behavior.
-
-## R3 — Runtime Router / FastAPI — PENDING
+## R3 — Runtime Router / FastAPI — PASS
 ### Goal
-Route a Run to the Workflow's selected policy/runtime rather than hard-wiring Career.
+Route each Run through the runtime selected by the durable Workflow policy rather than hard-wiring Career.
 
-### Required
-- Run start resolves policy from Workflow configuration.
-- Generic Workflow invokes Generic runtime.
-- Career Workflow invokes Career runtime.
-- Career runtime consumes explicit WorkerSlot role bindings rather than Agent-name prefixes.
-- Generic Manager + 2 Worker API E2E PASS.
-- Career API regression PASS using explicit policy/role binding.
-- Resume/follow-up routing selects the correct runtime for the Run's Workflow.
-- Error responses distinguish invalid generic structure from policy-specific validation.
-- PRD compliance review = PASS.
+### Implemented behavior
+- FastAPI resolves execution policy from persisted `Workflow.policy_id`; Generic (`None`) and `career_cover_letter` select different runtimes.
+- `RunPayload.policy` is no longer a Career default. When supplied only as a compatibility hint, it cannot override the stored Workflow policy; mismatch returns 409.
+- `/runs/with-files` follows the same stored-policy rule and supports Generic initial execution files rather than forcing Career.
+- `/runs/{id}`, history, Resume, and Session follow-up resolve the runtime from the persisted Run/Workflow relationship.
+- Follow-up validates that `previous_run_id` belongs to the same Workflow Session before starting a Continuation Run.
+- Career runtime now resolves W1–W6 exclusively from `Workflow.policy_config.slot_roles[worker_id]`; Agent names are not role identifiers.
+- Career execution-file target matching includes the explicit WorkerSlot binding while preserving stage/role/Agent targets.
+- Generic and Career runtime/configuration errors are normalized with policy-specific error context.
+- Existing STEP 9 initial-file API and fixtures were migrated to explicit Career policy semantics; Generic remains the default when no policy is selected.
+
+### Gate
+- [x] Run start resolves Workflow policy.
+- [x] Generic Workflow → Generic runtime.
+- [x] Career Workflow → Career runtime.
+- [x] Career runtime consumes explicit WorkerSlot role bindings; no Agent-name role inference.
+- [x] Generic Manager + 2 arbitrary Worker API E2E PASS.
+- [x] Generic `/runs/with-files` resolves stored policy and passes execution-file evidence.
+- [x] Generic Resume resolves runtime from the Run's Workflow and resumes the same Run/thread.
+- [x] Generic completed-result Follow-up + file routes through Generic runtime and creates a Continuation Run + Revision v2.
+- [x] Career API regression PASS with arbitrary Agent names + explicit slot roles.
+- [x] Client policy override is rejected for JSON and multipart Run start paths.
+- [x] Policy-specific validation/error separation PASS.
+- [x] 108 Python unit/boundary tests PASS.
+- [x] STEP 3, R2 Generic, STEP 4 Career, STEP 5 API, STEP 7 Discord, STEP 8 Notion, STEP 9 maintenance smokes PASS.
+- [x] Final Acceptance 1–19 PASS.
+- [x] React UI tests/build PASS.
+- [x] PRD compliance review = PASS.
+
+### R3 PRD compliance review
+R3 restores the FastAPI service boundary required by FR-14 without coupling Generic execution to the Career template. Generic Linear/Hierarchical behavior remains the default capability; Career W1–W6 remains an explicit domain policy. Session/Run, same-Run HITL Resume, Continuation Run follow-up, file durability, immutable Artifact/Revision, and manual-recovery invariants remain intact. No new Product Decision outside approved PRD v1.0 was introduced.
 
 ## R4 — Local UI / Template UX — PENDING
 ### Goal
@@ -151,4 +165,4 @@ Prove that restoring Generic execution did not break Career or cross-cutting dur
 No implementation PR is merged until R0–R5 relevant gates are checked and the final PRD compliance review is PASS. If a checkpoint exposes a new product decision not fixed by PRD v1.0, stop and ask the user before implementing that decision.
 
 ## Current gate
-**R0 PASS → R1 PASS → R2 PASS → STOP. User approval required before R3 implementation.**
+**R0 PASS → R1 PASS → R2 PASS → R3 PASS → STOP. R4 implementation requires the next explicit user approval.**
