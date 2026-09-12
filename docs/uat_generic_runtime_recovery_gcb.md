@@ -131,20 +131,37 @@ Route each Run through the runtime selected by the durable Workflow policy rathe
 ### R3 PRD compliance review
 R3 restores the FastAPI service boundary required by FR-14 without coupling Generic execution to the Career template. Generic Linear/Hierarchical behavior remains the default capability; Career W1–W6 remains an explicit domain policy. Session/Run, same-Run HITL Resume, Continuation Run follow-up, file durability, immutable Artifact/Revision, and manual-recovery invariants remain intact. No new Product Decision outside approved PRD v1.0 was introduced.
 
-## R4 — Local UI / Template UX — PENDING
+## R4 — Local UI / Template UX — PASS
 ### Goal
 Make the generic-first model obvious and prevent the UI from implying Career-specific naming rules for normal Agents.
 
-### Required
-- Workflow form exposes Generic vs Career policy/template selection.
-- Generic is the default.
-- Agent name examples are domain-neutral.
-- Career role mapping UI appears only for Career policy.
-- Career missing/duplicate roles are pre-validated.
-- Manager + 2 Worker Generic Workflow can be created/started from UI.
-- Issue #21 API-base connection UX is fixed/regression-tested.
-- UI tests/build PASS.
-- PRD compliance review = PASS.
+### Implemented behavior
+- Workflow form now exposes `Generic` and `Career Cover Letter` policy/template selection, with Generic as the default.
+- Agent examples are domain-neutral (`Researcher`, `research-agent`) and Agent identity remains independent from Workflow role.
+- Career selection forces Hierarchical mode and reveals WorkerSlot-level W1–W6 role selectors only for that policy.
+- Career role mapping is serialized to `policy_config.slot_roles[worker_id]`; Agent names are never used as Career role identifiers.
+- Missing, duplicate, invalid Career roles and duplicate Step/Worker Slot IDs are rejected before save.
+- Generic Manager + arbitrary Worker 2명 form payload is covered by UI contract tests and routes through the already-passing R3 Generic API E2E path.
+- Run Studio no longer sends a Career default policy; Session Workflow labels expose Generic vs Career explicitly.
+- Issue #21 connection UX is corrected: the known local backend root without `/api` is auto-repaired, connection health probes mounted API resources before showing Connected, and Settings provides a one-click default reset plus clear recovery guidance.
+- Career role layout is responsive without adding a Visual Node Editor or new product scope.
+
+### Gate
+- [x] Workflow form exposes Generic vs Career policy/template selection.
+- [x] Generic is the default.
+- [x] Agent name examples are domain-neutral.
+- [x] Career role mapping UI appears only for Career policy.
+- [x] Career missing/duplicate roles are pre-validated.
+- [x] Manager + 2 Worker Generic Workflow UI contract + backend execution path PASS.
+- [x] Issue #21 API-base connection UX fixed and regression-tested.
+- [x] 11 React/Vitest UI contract tests PASS.
+- [x] Vite production build PASS.
+- [x] 108 Python unit/boundary tests + STEP 3/R2/STEP 4/5/7/8/9 smokes + Final Acceptance 1–19 PASS.
+- [x] Latest branch-head CI: `local-ui` SUCCESS, `unit-tests` SUCCESS.
+- [x] PRD compliance review = PASS.
+
+### R4 PRD compliance review
+R4 aligns the Local UI with PRD P4/FR-01/FR-04/FR-05/FR-14/FR-15: reusable Agents remain domain-agnostic, Generic Workflow creation is the default path, and Career-only W1–W6 semantics are visible only when the explicit Career policy is selected. The API connection fix also prevents root `/health` from masking an invalid mounted API base. No Graph editor, marketplace, multi-user, or secret-entry scope was introduced.
 
 ## R5 — Regression / UAT Gate — PENDING
 ### Goal
@@ -165,4 +182,4 @@ Prove that restoring Generic execution did not break Career or cross-cutting dur
 No implementation PR is merged until R0–R5 relevant gates are checked and the final PRD compliance review is PASS. If a checkpoint exposes a new product decision not fixed by PRD v1.0, stop and ask the user before implementing that decision.
 
 ## Current gate
-**R0 PASS → R1 PASS → R2 PASS → R3 PASS → STOP. R4 implementation requires the next explicit user approval.**
+**R0 PASS → R1 PASS → R2 PASS → R3 PASS → R4 PASS → STOP. R5 implementation requires the next explicit user approval.**
