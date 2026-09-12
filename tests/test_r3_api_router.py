@@ -25,6 +25,10 @@ class RouterProvider:
     def generate(self, *, model: str, instructions: str, input_text: str) -> ModelResponse:
         self.calls.append({"model": model, "instructions": instructions, "input_text": input_text})
         if "[GENERIC_HIERARCHICAL_MANAGER]" in input_text:
+            if "Need human input" in input_text:
+                if "[HUMAN_ANSWERS]" not in input_text:
+                    return ModelResponse(text=json.dumps({"action": "needs_input", "question": "Provide the missing detail."}))
+                return ModelResponse(text=json.dumps({"action": "final", "final": "GENERIC HUMAN FINAL"}))
             self.generic_manager_round += 1
             if self.generic_manager_round == 1:
                 return ModelResponse(text=json.dumps({"action": "delegate", "assignments": [
@@ -60,7 +64,7 @@ class R3ApiRouterTests(unittest.TestCase):
         self.persistence.close()
         self.tmp.cleanup()
 
-    def test_generic_manager_two_workers_runs_without_w_names(self) -> None:
+    def _seed_generic_hierarchy(self, *, workflow_id: str = "generic-h", session_id: str = "generic-session") -> None:
         for payload in (
             {"id": "manager", "name": "Coordinator", "model": "fake"},
             {"id": "researcher", "name": "Researcher", "model": "fake"},
@@ -68,7 +72,7 @@ class R3ApiRouterTests(unittest.TestCase):
         ):
             self.assertEqual(self.client.post("/agents", json=payload).status_code, 201)
         workflow = self.client.post("/workflows", json={
-            "id": "generic-h",
+            "id": workflow_id,
             "name": "Generic Hierarchy",
             "mode": "hierarchical",
             "hierarchy": {
@@ -81,7 +85,10 @@ class R3ApiRouterTests(unittest.TestCase):
         })
         self.assertEqual(workflow.status_code, 201, workflow.text)
         self.assertIsNone(workflow.json()["policy_id"])
-        self.assertEqual(self.client.post("/sessions", json={"id": "generic-session", "workflow_id": "generic-h"}).status_code, 201)
+        self.assertEqual(self.client.post("/sessions", json={"id": session_id, "workflow_id": workflow_id}).status_code, 201)
+
+    def test_generic_manager_two_workers_runs_without_w_names_and_followup_routes_generic(self) -> None:
+        self._seed_generic_hierarchy()
         result = self.client.post("/runs", json={"id": "generic-run", "session_id": "generic-session", "user_request": "Analyze and review this."})
         self.assertEqual(result.status_code, 201, result.text)
         body = result.json()
@@ -89,6 +96,38 @@ class R3ApiRouterTests(unittest.TestCase):
         self.assertEqual(body["revision"]["final_output"], "GENERIC FINAL")
         artifacts = self.client.get("/sessions/generic-session/artifacts").json()
         self.assertEqual({item["metadata"]["worker_id"] for item in artifacts}, {"research-slot", "review-slot"})
+
+        follow = self.client.post(
+            "/sessions/generic-session/messages",
+            data={"previous_run_id": "generic-run", "content": "Tighten the final answer."},
+            files={"files": ("note.txt", b"GENERIC FOLLOWUP EVIDENCE", "text/plain")},
+        )
+        self.assertEqual(follow.status_code, 201, follow.text)
+        follow_body = follow.json()
+        self.assertEqual(follow_body["status"], "COMPLETED")
+        self.assertNotEqual(follow_body["run_id"], "generic-run")
+        self.assertEqual(follow_body["revision"]["version"], 2)
+        self.assertEqual(follow_body["revision"]["final_output"], "GENERIC FINAL")
+        self.assertTrue(any("GENERIC FOLLOWUP EVIDENCE" in call["input_text"] for call in self.provider.calls))
+
+    def test_generic_resume_uses_run_workflow_policy_and_same_thread(self) -> None:
+        self._seed_generic_hierarchy(workflow_id="generic-hitl", session_id="generic-hitl-session")
+        waiting = self.client.post(
+            "/runs",
+            json={"id": "generic-hitl-run", "session_id": "generic-hitl-session", "user_request": "Need human input before finalizing."},
+        )
+        self.assertEqual(waiting.status_code, 201, waiting.text)
+        self.assertEqual(waiting.json()["status"], "WAITING_FOR_USER")
+        resumed = self.client.post(
+            "/runs/generic-hitl-run/resume",
+            json={"mode": "user", "answer": "Here is the missing detail."},
+        )
+        self.assertEqual(resumed.status_code, 200, resumed.text)
+        body = resumed.json()
+        self.assertEqual(body["status"], "COMPLETED")
+        self.assertEqual(body["run_id"], "generic-hitl-run")
+        self.assertEqual(body["thread_id"], "generic-hitl-run")
+        self.assertEqual(body["revision"]["final_output"], "GENERIC HUMAN FINAL")
 
     def test_generic_initial_file_route_uses_stored_policy(self) -> None:
         self.assertEqual(self.client.post("/agents", json={"id": "worker", "name": "Plain Worker", "model": "fake"}).status_code, 201)
