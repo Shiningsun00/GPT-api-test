@@ -18,6 +18,7 @@ from .app import (
     _graph_result_payload,
     _runtime_for_workflow,
     _workflow_for_session,
+    _workflow_policy_label,
     create_app as create_core_app,
 )
 
@@ -43,16 +44,23 @@ def create_app(context: BackendContext | None = None):
     async def start_run_with_files(
         session_id: str = Form(...),
         user_request: str = Form(...),
-        policy: str = Form("career_cover_letter"),
+        policy: str | None = Form(None),
         run_id: str | None = Form(None),
         target_ids: list[str] = Form(default=[]),
         files: list[UploadFile] = File(default=[]),
     ) -> dict[str, Any]:
-        if policy != "career_cover_letter":
-            raise HTTPException(status_code=422, detail=f"unsupported workflow policy: {policy}")
         session, workflow = _workflow_for_session(ctx, session_id)
+        stored_policy = _workflow_policy_label(workflow)
+        if policy is not None and policy != stored_policy:
+            raise HTTPException(
+                status_code=409,
+                detail=f"run policy override does not match stored workflow policy: requested={policy}, stored={stored_policy}",
+            )
         if ctx.persistence.runs.list_active():
             raise HTTPException(status_code=409, detail="another active run already exists")
+
+        # Resolve and validate the stored Workflow policy before persisting a Run or files.
+        runtime = _runtime_for_workflow(ctx, workflow)
         run = new_initial_run(session, run_id=run_id)
         ctx.persistence.runs.save(run)
         stored = []
@@ -73,7 +81,6 @@ def create_app(context: BackendContext | None = None):
                 )
                 ctx.persistence.run_files.save(execution_file)
                 execution_files.append(execution_file)
-            runtime = _runtime_for_workflow(ctx, workflow)
             outcome = runtime.start_initial(run, user_request=user_request)
         except Exception:
             latest = ctx.persistence.runs.get(run.id)
